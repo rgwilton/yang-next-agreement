@@ -1,0 +1,100 @@
+//| mill-version: 1.0.6
+//| mill-jvm-version: temurin:21
+//| mvnDeps:
+//| - uk.org.wilton::ietf-yang-mill-plugin::0.0.11
+
+package build
+
+import mill.*, scalalib.*
+import uk.org.wilton.ietf.yang.mill.plugin.*
+
+object `package` extends IETF:
+  def draft = Task.Source:
+    "draft-wilton-netmod-yang-next-agreement.md"
+
+  // All RFCs that we need to extract YANG from.
+  def rfcDeps = List(
+    7950
+ )
+
+  // All drafts that we need to extract YANG from.
+  def draftDeps = Seq(
+    //  "draft-ietf-netmod-yang-module-versioning-15",
+    //  "draft-ietf-netmod-yang-semver-24",
+    //  "draft-ietf-netmod-rfc8407bis-28",
+    //  "draft-ietf-netmod-yang-module-filename-03",
+    //  "draft-ietf-netmod-yang-schema-comparison-05"
+  )
+
+  // IANA YANG dependencies.
+  def ianaDeps = Seq(
+    // "iana-tls-cipher-suite-algs@2024-10-16.yang"
+  )
+
+  def extractedFileRenames = Map(
+      // "ietf-distributed-notif@2024-04-14.yang" -> "ietf-distributed-notif@2024-04-21.yang",
+      // "ietf-yang-push-revision@2024-05-28.yang" -> "ietf-yang-push-revision@2024-06-16.yang"
+    )
+
+  def excludedModules = Set(
+    // "ietf-https-notif-transport@2024-02-01.yang",
+    // "ietf-yang-library-rfc7895-augmentedby.yang"
+  )
+
+  def yangCompiles = Seq(
+    // Seq("ietf-yp-lite.yang", "ietf-yp-lite-config.yang"),
+    // Seq("ietf-yp-lite-capabilities.yang", "ietf-yp-lite.yang"),
+    // Seq("ietf-udp-notif-transport-2.yang", "ietf-yp-lite.yang")
+  )
+
+  def yangTrees = Seq(
+    // (Seq("ietf-yp-lite.yang"), "ietf-yp-lite-tree.txt", None),
+    // (Seq("ietf-yp-lite-config.yang"), "filters.txt", Some("datastore-telemetry/filters")),
+    // (Seq("ietf-yp-lite-config.yang"), "subscriptions.txt", Some("datastore-telemetry/subscriptions")),
+    // (Seq("ietf-yp-lite-config.yang"), "update-trigger.txt", Some("datastore-telemetry/subscriptions/subscription/update-trigger")),
+    // (Seq("ietf-yp-lite-config.yang"), "receivers.txt", Some("datastore-telemetry/receivers")),
+    // (Seq("ietf-yp-lite-config.yang"), "ietf-yp-lite-config-tree.txt", None),
+    // (Seq("ietf-yp-lite-capabilities.yang"), "ietf-yp-lite-capabilities-tree.txt", None),
+    // (Seq("ietf-yp-lite-capabilities.yang", "ietf-system-capabilities@2022-02-17.yang"), "ietf-system-capabilities-tree.txt", None)
+  )
+
+  def yangTreeSnippets = Seq(
+    // ("ietf-yp-lite-tree.txt", "-x establish-subscription", "-x modify-subscription", "establish-subscription.txt"),
+    // ("ietf-yp-lite-tree.txt", "-x modify-subscription", "-x delete-subscription", "modify-subscription.txt"),
+    // ("ietf-yp-lite-tree.txt", "-x delete-subscription", "-x kill-subscription", "delete-subscription.txt"),
+    // ("ietf-yp-lite-tree.txt", "-x kill-subscription", "notifications", "kill-subscription.txt"),
+    // ("ietf-yp-lite-tree.txt", "-n subscription-started", "subscription-modified", "subscription-started.txt"),
+    // ("ietf-yp-lite-tree.txt", "-n subscription-modified", "subscription-terminated", "subscription-modified.txt"),
+    // ("ietf-yp-lite-tree.txt", "-n subscription-terminated", "receiver-disconnected", "subscription-terminated.txt"),
+    // ("ietf-yp-lite-tree.txt", "-n update$", "-n update-complete", "update-notification.txt"),
+    // ("ietf-yp-lite-tree.txt", "-n update-complete", "<end>", "update-complete.txt"),
+  )
+
+
+
+  def all = Task:
+    checkDraftLatest()
+    make()
+    println(s"Task all Finished")
+
+
+
+  object publisher extends ScalaModule:
+    def scalaVersion = "3.7.3"
+    def mvnDeps = Seq(
+      mvn"com.lihaoyi::upickle:4.3.1",
+      mvn"com.lihaoyi::mainargs:0.7.6",
+      mvn"org.scala-lang.modules::scala-xml:2.3.0"
+    )
+
+/*
+ * Run manually to generate the requests:
+ *
+ * There should be a way to hook this into the build script.
+ *
+ * ./mill publisher.run netconfExample --max-line-length=69 --path="ietf-interfaces:interfaces/interface/statistics"
+ *   --description="Interface statistics, 30s period" -n "interface-statistics" -o examples/netconf/rpc/netconf-establish-sub-if-stats.xml
+ *
+ * And the reply:
+ * ./mill -i publisher.run netconfReply --max-line-length=69 -o examples/netconf/rpc/establish-subscription-reply.xml
+ */

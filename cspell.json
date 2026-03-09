@@ -1,0 +1,37 @@
+{
+  "version": "0.2",
+  "language": "en",
+  "ignorePaths": [
+    "*.json",
+    "out/**"
+  ],
+  "words": [
+    "cbor",
+    "DSCP",
+    "dtls",
+    "identityref",
+    "ietf",
+    "iesg",
+    "keepalive",
+    "nacm",
+    "netconf",
+    "netmod",
+    "nmop",
+    "NMDA",
+    "notif",
+    "oper",
+    "QUIC",
+    "restconf",
+    "yangtree",
+    "unconfigured",
+    "unconfiguring",
+    "Holger",
+    "Benoit",
+    "Ebben",
+    "Voyer",
+    "Paolo",
+    "Lucente"
+  ],
+  "flagWords": [
+  ]
+}
