@@ -39,7 +39,6 @@ informative:
 
 The purpose of this document is to discuss and agreement on what the scope and shape the next version of YANG should take.
 
-
 --- middle
 
 # Introduction
