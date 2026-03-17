@@ -44,79 +44,111 @@ The purpose of this document is to discuss and agreement on what the scope and s
 
 # Introduction
 
-The [YANG Next Issue Tracker](https://github.com/netmod-wg/yang-next/issues/) lists around 125 open issues and 35 closes (some perhaps closed because they would have been non-backwards-compatible changes which were not be considered at the time).  These issues are of varying size, complexity and importance.  If the contents of the next version of YANG is defined solely by which issues folks would like to work (i.e., the bazaar method) then there is a risk that we will end up with a potential large and somewhat inconsistent update to the language.  It is unclear whether this gain consensus within the IETF or widespread traction within the industry.
+The [YANG Next Issue Tracker](https://github.com/netmod-wg/yang-next/issues/) lists around 125 open issues and 35 closed (some perhaps closed because they would have been non-backwards-compatible changes which were not be considered at the time that they were being evaluated).
 
-Hence, this document proposes that we reach clear consensus on what problems a revised version of YANG is intending to solve and for the issues to be categories into 4 sets:
+These issues are of varying size, complexity and importance.  If the contents of the next version of YANG is defined solely by which issues folks would like to work on (i.e., the bazaar method) then there is a risk that we will end up with a potential large and somewhat inconsistent update to the language.  It is unclear whether this would gain consensus within the IETF or widespread traction within the industry.
 
-- issues that must be included in a next version of YANG
-- issues that should be consider for the next version of YANG (if there is sufficient interest)
-- issues that should be deferred at this time
-- issues that should not be considered, i.e., implementing them would likely be harmful to the language.
+Hence, this document proposes that attempt to reach clear consensus on what problems a revised version of YANG is intending to solve and for the issues to be categories into 4 sets:
 
+1. issues that must be included in a next version of YANG
+1. issues that should be consider for the next version of YANG (if there is sufficient interest)
+1. issues that should not be considered for the next version of YANG, but could be considered for future versions.
+1. issues that should not be considered further, i.e., implementing them would likely be too harmful for the language because it would make the language too big or complex or the specification would be too long.
+
+It is worth noting that a couple of separate efforts to score issues has been made, e.g., adding meta-data annotations, or closing the issues, but that in itself does not indicate what issues should be worked on.
+
+In addition, it should be noted that {{issue-152}} has proposed a slightly different scoring/classification of issues (by Andy Bierman).
+
+There is no goal to publish this document as an RFC, and probably the issues could be tracked via a github dashboard.  But a document like this may be a good way to ensure that the working group is aware of what changes are proposed and to ensure that there is consensus.
 
 # Proposed changes that should be made to YANG
 
-The set of issues in this section are ones that the authors believe should be added to any future version of YANG.  Many of these issues are clarifications or small additions to the language.
+The set of issues in this section are ones that the authors believe should be added to any future version of YANG.  Many of these issues are clarifications, small/easy additions, or high importance issues.
 
-Summary of changes:
-- Deviations, should be recommend that they be limited to not-supported.
+Summary of proposed changes:
 
-Proposed changes:
-1. Add a default value for namespace {{issue-5}}
+- Cleanup up the base specification:
+  - Factor out XML encoding rules, {{issue-10}}
+  - Move NETCONF specifics out, {{issue-11}}
+  - Remove normative references to RFC 6241, {{issue-12}}
+  - Apply verified errata, {{issue-134}}
+  - Further restrict YANG Unicode to exclude "del" and C0 control characters, {{issue-125}}
+  - Is any NMDA (RFC 8342) cleanup needed (**no github tracking issue**)
+- Apply clarifications, 13 issues listed in {{clarifications}}
+- Deprecations & removals :
+  - Deprecate "import by exact revision", {{issue-75}}
+  - Remove the "anyxml" statement{{issue-105}}
+- Fold in some keywords/functionality from extension drafts:
+  - Incorporate structure extension, {{issue-8}}
+  - Deprecate "import by exact revision", {{issue-75}}
+  - Make NACM default-deny-all and default-deny-write built-in statements, but may need to generalize rather than being tied to NACM, {{issue-61}}
+  - YANG versioning, {{issue-45}}, {{issue-65}}, {{issue-66}}
+- 12 minor enhancement, in {{minor-enhancements}}
+- 13 larger improvements, in {{larger-improvements}}
 
+In total, this is about 51 of the YANG Next issues that have been raised.
+
+## Clarifications {#clarifications}
+
+All of these issues are applying clarifications that are not intended to change the behaviour in the base specification, just make the specification clearer.  For some of these issues, after review, the conclusion may be that no changes are needed.
+
+| Issue | Additional information |
+| - | - |
+| {{issue-27}} Clarify YANG "status" keyword usage (e.g., hierarchical) | |
+| {{issue-44}} Clarify if multiple deviations target the same schema parts | |
+| {{issue-88}} clarify NP-containers | |
+| {{issue-96}} Clarify definitions of YANG schema tree, vs module schema tree | This termology is confusing, we should cleanup/clarify |
+| {{issue-99}} Clarify duplicate revision dates used in revision history | |
+| {{issue-103}} Clarify implicit 'case' behavior | |
+| {{issue-104}} clarify "instance-required" behavior in typedefs | |
+| {{issue-110}} Clarify canonical order in RFC 7950 | |
+| {{issue-111}} Clarify whether revision-dates must be unique or not | |
+| {{issue-115}} Clarify the meaning of properties which have default value | |
+| {{issue-116}} Clarify the behavior if the schema nodes in XPath expression are un-supported | |
+| {{issue-126}} Injection of circular imports by deviation | Clarify rejection, or allow circular imports |
+| {{issue-146}} | Consistent default value behavior for operations and validation | |
+{: title="Clarifications"}
+
+## Minor enhancements {#minor-enhancements}
+
+This list of changes is for relatively minor/isolated enhancements.  I.e., the changes are expected to be more isolated, or eady to add.
 
 | Issue | Consideration Reason |
 | - | - |
 | {{issue-5}} default to namespace `urn:yang:<module-name>` | Removes unnecessary noise from the language. |
-| {{issue-7}} Support media-type specific schema that can be used to model error-info and other mount-points | YANG needs encoding agnostic way of returning errors. |
-| {{issue-8}} Incorporate structure extension | Smaller extension/addition to the language |
-| {{issue-10}} Factor out XML encoding rules into own RFC | Simplifies and makes YANG draft encoding agnostic |
-| {{issue-11}} Move NETCONF-specific sections to NETCONF WG documents | Cleans up and simplifies YANG draft |
-| {{issue-12}} Remove normative references to RFC 6241 | Keeps YANG mgmt protocol agnostic |
-| {{issue-27}} Clarify YANG "status" keyword usage (e.g., hierarchical) | Make it clear status is hierarchial |
 | {{issue-28}} add 'status' as a sub statement to 'module' | Seems like small/easy addition |
 | {{issue-33}} Tag YANG identity as an intermediate base for classification only | Seems like a small useful adition |
-| {{issue-34}} Add native support for float/double |We should just do this, Dec64 causes pain. |
+| {{issue-34}} Add native support for float/double | We should just do this, Dec64 causes pain in specs and implementations |
+| {{issue-59}} Preliminary Status | Should be able to introduce unstable data nodes to mature models (e.g., "status experimental") |
+| {{issue-94}} deref() function for leafref statements | Implementations already allow this. |
+| {{issue-98}} Disallow if-feature statements where enabling the feature removes data nodes from the schema | We should just fix this |
+| {{issue-101}} allow 'require-instance' to be refined | Simple change |
+| {{issue-125}} Further restrict YANG Unicode to exclude "del" and C0 control characters | Same tweak to conform with RFC 9839 |
+| {{issue-128}} Relax rules on usage of deprecated or obsolete identifiers | Possibly dup of {{issue-65}} or {{issue-66}} |
+| {{issue-130}} Add 'deprecated' statement | Extra meta-data that is easy to add. |
+| {{issue-155}} Allow hexadecimal notation for enum values | Seems like a small enhancement |
+{: title="Minor Enhancements"}
+
+## Larger improvements {#larger-improvements}
+
+This list of issues tracks more important issues that will require more work, discussion, (and probably text) to specify but are deemed to be important to help grow the language.
+
+| Issue | Consideration Reason |
+| - | - |
+| {{issue-7}} Support media-type specific schema that can be used to model error-info and other mount-points | YANG needs encoding agnostic way of returning errors. |
 | {{issue-40}} Allow deviation for Identities | E.g., to allow identities to be marked as not-supported  |
-| {{issue-44}} Clarify if multiple deviations target the same schema parts | Clarification of expected behaviour is helpful |
-| {{issue-45}} Refine YANG versioning | Some aspects of YANG versioning (inc semver statements) should be added to YANG 2.0, see also {{issue-135}}.  Update module update rules {{issue-136}} |
 | {{issue-49}} Introduce critical extensions| Would be allowed to extend YANG semantics |
 | {{issue-51}} A general way to add stmts to any part of a schema | Would it very useful, but is a bigger change |
 | {{issue-56}} context-independent encoding of instance-identifiers and identityrefs | We should have a module name prefix based scheme |
-| {{issue-59}} Preliminary Status | Should be able to introduce unstable data nodes to mature models (e.g., status experimental) |
-| {{issue-61}} Make NACM default-deny-all and default-deny-write built-in statements | Should be built in, but perhaps not tied to only NACM? |
 | {{issue-62}} Currently, list keys are all mandatory - allows default values for keys | Adding key defaults would simplify some model usecases |
-| {{issue-65}} Require implementation of "status deprecated" data nodes | Part of YANG versioning work |
-| {{issue-66}} Require that "status obsolete" nodes are not implemented | Part of YANG versioning work |
 | {{issue-70}} Introduce support for critical annotations | Would be useful addition |
-| {{issue-75}} Deprecate "import by exact revision" | Disallow for YANG 2.0 modules |
 | {{issue-76}} Make submodule "include" statement require a revision date. | Required to make module definition sound  |
 | {{issue-80}} enable a server express conformance to a set of identifiers | Same as issue {{issue-40}} |
-| {{issue-88}} clarify NP-containers | We should clarify, but not change the behaviour |
-| {{issue-94}} deref() function for leafref statements | Implementations already allow this. |
 | {{issue-95}} Allow an module import to be defined as "types only" | Adds a useful refinement to import dependencies. |
-| {{issue-96}} Clarify definitions of YANG schema tree, vs module schema tree | This termology is confusing, we should cleanup/clarify |
-| {{issue-98}} Disallow if-feature statements where enabling the feature removes data nodes from the schema | We should just fix this |
-| {{issue-99}} Clarify duplicate revision dates used in revision history | Simple clarification |
-| {{issue-101}} allow 'require-instance' to be refined | Simple change |
-| {{issue-103}} Clarify implicit 'case' behavior | Clarification |
-| {{issue-104}} clarify "instance-required" behavior in typedefs | Clarification |
-| {{issue-105}} remove the "anyxml" statement | Cleanup, remove XML dependency |
-| {{issue-110}} Clarify canonical order in RFC 7950 | Clarification |
-| {{issue-111}} Clarify whether revision-dates must be unique or not | Clarification |
-| {{issue-115}} Clarify the meaning of properties which have default value | Clarification |
-| {{issue-116}} Clarify the behavior if the schema nodes in XPath expression are un-supported | Clarification |
 | {{issue-121}} Add support for hierarchical default values | These turn up in modeling and should be relatively easy to implement. |
-| {{issue-125}} Further restrict YANG Unicode to exclude "del" and C0 control characters | Same tweak to conform with RFC 9839 |
-| {{issue-126}} Injection of circular imports by deviation | Clarify rejection, or allow circular imports |
-| {{issue-128}} Relax rules on usage of deprecated or obsolete identifiers | Possibly dup of {{issue-65}} or {{issue-66}} |
-| {{issue-130}} Add 'deprecated' statement | Extra meta-data that is easy to add. |
-| {{issue-134}} Apply verified errata and resolve held for document update errata | Clarifications  |
-| {{issue-146}} Consistent default value behavior for operations and validation | Clarify existing behaviour |
-| {{issue-149}} Error statement for actions rpcs | Simplifies RPC/protocol bindings |
+| {{issue-149}} Error statement for actions rpcs | Simplifies RPC/protocol bindings, same/similar as {{issue-7}} |
 | {{issue-154}} Add ability to remove nodes from a grouping in a "uses" statement | This would be helpful and improve reuse |
-| {{issue-155}} Allow hexadecimal notation for enum values | Seems like a small enhancement |
-
+{: title="Larger Improvements"}
 
 # Proposed issues to consider for the next version of YANG
 
@@ -129,7 +161,7 @@ This list includes items that require further evaluation.  Once fully evaluated 
 | {{issue-13}} Modify usage examples to be less NETCONF focused | Need to keep examples. |
 | {{issue-16}} Allow when in action | Relatively simple addition? |
 | {{issue-21}} Restrict regex to a subset of XML regex specification | Would make implementation easier, could use the IETF Regex spec? |
-| {{issue-26}} Consider removing support for sub modules from YANG | Proposal is to deprecate |
+| {{issue-26}} Consider removing support for sub modules from YANG | Proposal is to deprecate to simplify |
 | {{issue-29}} Clarify YANG validation for data nodes 'decoded' from anydata to a tree of real nodes |  Was closed, but there is draft **TODO** related to this?  |
 | {{issue-30}} key-predicate-expr should be (quoted-string / integer-value / decimal-value) | Was closed, but perhaps needs to be re-evaluated for a YANG 2.0? |
 | {{issue-31}} Add 'clone' statement | Was closed, but should consider reuse outside groupings? |
@@ -140,7 +172,8 @@ This list includes items that require further evaluation.  Once fully evaluated 
 | {{issue-46}} Binary encoding support (lets some types have binary persistence) | Should consider, discuss with CORE folks |
 | {{issue-57}} introduce if-module | Is this worth the effort? |
 | {{issue-58}} Introduce XPath function datastore() | Evaluate - Need to understand how this would be used? |
-| {{issue-60}} Allowing module private groupings, typedefs| Allow definitions to be private to modules.  Would this reduce reuse?  |
+| {{issue-60}} Allowing module private groupings, typedefs| Allow some top level definitions to be private to modules. |
+| {{issue-63}} Should it be possible to deviate "status"? | Should consider, e.g., to indicate obsolete nodes as still being supported? |
 | {{issue-68}} Add if-feature on must stmt  (removed  "on import stmt" part) | Should consider  |
 | {{issue-69}} Clarify 'deviation' substatements to match ABNF grammar | Helpful to clarify |
 | {{issue-72}} Introduce an annotation that resolves the union member | Can we get unions to be consistent across encodings? |
@@ -164,43 +197,48 @@ This list includes items that require further evaluation.  Once fully evaluated 
 | {{issue-139}} Clarify adding mandatory nodes with augment + when | This might be worth relaxing/clarifying |
 | {{issue-143}} Allow deviation-stmt within uses-stmt | Proposal is allow more refinement. |
 | {{issue-144}} YANG 1.1 translation | Unclear if this would even be possible ... |
-
+{: title="Possible issue for next YANG version"}
 
 # Open issues that should not be made for the next version of YANG
+
+I think that the biggest challenges or potential long term enhancements to YANG are:
+
+- replacing XPath with a YANG specific expression language.
+- having a cleaner way of handling lists with multiple keys, e.g., when referenced
+- a generic way to augment additional statements into a YANG module.
+- more advanced or flexible reuse beyond groupings, including perhaps the ability to augment into a grouping.
+
 
 | Issue | Consideration Reason |
 | - | - |
 | {{issue-14}} Allow deviations to modify "when" statements | Does this add to much complexity? |
 | {{issue-15}} Incorporate/merge RFC 7952 (yang-metadata) | Not that widely used, better as a separate extension rather than in core document? |
-| {{issue-17}} replace 'encoding' with 'representation' | I'm not convinced this is really necessary |
-| {{issue-18}} add a templating mechanism | This is being done in a separate draft, too fresh  |
+| {{issue-18}} add a templating mechanism | Done as a separate draft, wait for it to mature first  |
 | {{issue-19}} yang canonical integer format | Not sure whether this is really needed. |
 | {{issue-22}} Restrict usage to a subset of XPATH | Better solution may be to define separate YANG expression langauge  |
 | {{issue-48}} when using a grouping, the designer should be able to modify just about any aspect of the grouping | Was closed, may have too much accidental complexity? |
 | {{issue-53}} Create a way for a statement to tie-in with augment/deviation | Would seem to add a lot of complexity |
-| {{issue-54}} Define a way for extensions to declare sub-statement validity | Nice to have, but too much complexity |
-| {{issue-55}} define an encoding-independent "ypath:1.0" type | Was closed, but ypath draft is expected, too soon for YANG Next? |
-| {{issue-63}} Should it be possible to deviate "status"? | Should consider, e.g., to indicate obsolete nodes as still being supported? |
+| {{issue-54}} Define a way for extensions to declare sub-statement validity | Nice to have.  Better to do in extension draft? |
+| {{issue-55}} define an encoding-independent "ypath:1.0" type | Was closed, but draft planned. |
 | {{issue-71}} extension-stmt conformance | More investigation might be needed, but might be too much work for base YANG spec. |
-| {{issue-73}} Initial value | Wanted by 3GPP, but complexity in what it means. Do immutability work come into play here. |
+| {{issue-73}} Initial value | Wanted by 3GPP, but complexity in what it really means? Does immutability work come into play here. |
 | {{issue-74}} Support for unique leaf (or leaf combo) in a list of lists | Adds complexity to implementations, is this really needed? |
 | {{issue-77}} Add support for a tuple type | Not necessarily a tuple type but would like a nicer solution for multi-keyed lists |
 | {{issue-82}} enable features to be supported per grouping-use (not globally per-datastore) | Too high complexity? |
 | {{issue-86}} allow 'case' as a substatement to 'grouping' | Not sure it is worth the complexity |
 | {{issue-89}} add 'recommended-default' statement | Not worth the additional complexity |
 | {{issue-91}} Consider relaxing identity uniqueness to only require uniqueness with the base identity hierarchy | Nice to have, but is it worth it? |
+| {{issue-93}} support 'dynamic default' | Some models need this, but should limit the complexity. |
 | {{issue-113}} Treat if-feature which references a non-existing feature as valid YANG but not enabled | Unsure whether this is really needed? |
-| {{issue-117}} Add dynamic feature to YANG | Solution looks very complex. |
 | {{issue-119}} The next step of XPath | We should do something here, but it needs to be a separate draft |
 | {{issue-123}} Allow identities to be active even when module is not implemented | I don't think that we need to change behaviour, but clarification might be needed/helpful. |
 | {{issue-127}} Relax rules for identityref representation without a prefix | Postpone to XPath replacement |
 | {{issue-147}} New default-system statement to indicate that the default value  is not constant (determined by the system) | Seems complex, does system-datastore solve this anyway? |
 | {{issue-148}} YANG++ | This probably shouldn't be YANG, but a new language |
 | {{issue-150}} nbc-change-stmt | I don't think that we should do this now |
-| {{issue-151}} YANG profiles and views | Too complicated, packages may help |
 | {{issue-153}} Allow 'when' to be a child of the 'refine' statement | Not sure how this would work (without a container) |
-| {{issue-156}} canonical forms for strings (aka: the mac-address issue) | Adding text to description is probably as helpful |
-
+| {{issue-156}} canonical forms for strings (aka: the mac-address issue) | Need to spot data nodes that require custom handling. |
+{: title="Possible issues for a future YANG version (not the next one)"}
 
 # Closed issues
 
@@ -208,16 +246,42 @@ This set of issues are either already closed or the author believes that they sh
 
 Issues may be put in this section for any of these reasons:
 
+- the issue is already marked as closed in github, not some closed issues are present on the previous lists because the authors believe that circumstances have changed (i.e., a YANG 2.0 version might be an option) and the issues should be reconsidered.
 - the issue is a duplicate
 - the issue is due to a misunderstanding of the YANG language or specification
 - the consensus is that adding/introducing this issue would be harmful to the YANG language, perhaps taking it too far from its goals, or introducing too much complexity.
 - this issue relates to the protocols not the language and hence the issue should be moved to a network protocol issue tracker.
 
-| Issue | Closure Justification |
+## Open issues proposed for closure in github
+
+This list of issues are not currently marked as being closed in github, but the author is proposing that we close them, in that we *currently* do not consider them for implementation in any YANG version.
+
+| Issues Proposed for Closure | Closure Justification |
+| - | - |
+| {{issue-6}} Provide a correct ABNF for Yang strings | Perceived benefit is not worth the effort |
+| {{issue-17}} replace 'encoding' with 'representation' | I'm not convinced this is really necessary |
+| {{issue-102}} ascii vs. unicode strings | Seems too low priority, should close (also need to fix link) |
+| {{issue-107}} Add deviate(not-supported) support for identities | Dup of {{issue-40}}, should close |
+| {{issue-112}} Support for conditional default values | Seems too complex, should close |
+| {{issue-117}} Add dynamic feature to YANG | Solution looks very complex. |
+| {{issue-124}} Add ability to deviate or change status of an identity | Should close, dup of {{issue-40}}  |
+| {{issue-135}} Make YANG Semver real statements instead of extensions | Dup of {{issue-45}} |
+| {{issue-136}} Revise Module Update Rules | Should be covered by {{issue-45}} |
+| {{issue-140}} grouping usage requirements | Propose closing, should be in rfc8407bis |
+| {{issue-141}} Add automatic list key generation (autokey) | Proposing closing, this is a protocol not YANG issue |
+| {{issue-145}} Let a presence container have a default presence? | Propose closing, not implementable |
+| {{issue-151}} YANG profiles and views | Too complicated, packages may help |
+{: title="Currently open issues proposed for closure"}
+
+## Already closed issued in Github
+
+
+This follow list of issues are those already marked as being closed in the YANG Next Github tracker.
+
+| Already Closed Issues | Closure Justification |
 | - | - |
 | {{issue-1}} Only one idea per issue please! | Not a YANG issue (used for tracking only) |
 | {{issue-3}} Allow prefix statement to be optional for modules that don't need it | Undesirable change |
-| {{issue-6}} Provide a correct ABNF for Yang strings | Perceived benefit is not worth the effor. |
 | {{issue-9}} Add an inactive metadata annotation | Protocol extension not a language feature |
 | {{issue-20}} add explicit module version-stmt | Duplicate of {{issue-45}} |
 | {{issue-23}} add 'conformance-type' leaf to 'import' statement | Probably better done separately (e.g., packages)  |
@@ -235,25 +299,13 @@ Issues may be put in this section for any of these reasons:
 | {{issue-67}} clarify "require-instance" property for leafrefs | Deemed not to be an issue  |
 | {{issue-79}} add 'unique' as a substatement to 'leaf-list' | Not needed |
 | {{issue-85}} add "uses" as a sub-statement to "augment" | ALready supported in YANG 1.1  |
-| {{issue-93}} support 'dynamic default' | Too much complexity, propose that we close. |
-| {{issue-102}} ascii vs. unicode strings | Seems too low priority, should close (also need to fix link) |
-| {{issue-107}} Add deviate(not-supported) support for identities | Dup of {{issue-40}}, should close |
-| {{issue-112}} Support for conditional default values | Seems too complex, should close |
 | {{issue-114}} Don't treat non-exist import module as a error if there is no any effective reference to this import module in current module | Too hard to implement  |
 | {{issue-118}} Co-existence between YANG1.0 and YANG1.1 | Can't change existing specifications. |
 | {{issue-120}} allow more restriction on Identity-ref | Closed as a duplicate of other issues |
-| {{issue-124}} Add ability to deviate or change status of an identity | Should close, dup of {{issue-40}}  |
 | {{issue-132}} Allow config=true list without a key-stmt | Closed as dup |
-| {{issue-135}} Make YANG Semver real statements instead of extensions | Dup of {{issue-45}} |
-| {{issue-136}} Revise Module Update Rules | Should be covered by {{issue-45}} |
 | {{issue-137}} Add validation-rules-stmt to identify YANG validation scope | Closed, seems too complex |
-| {{issue-140}} grouping usage requirements | Propose closing, should be in rfc8407bis |
-| {{issue-141}} Add automatic list key generation (autokey) | Proposing closing, this is a protocol not YANG issue |
 | {{issue-142}} Allow if-feature on deviations | Duplicate of {{issue-2}} |
-| {{issue-145}} Let a presence container have a default presence? | Propose closing, not implementable |
-
-
-Note that {{issue-152}} has proposed a slightly different scoring/classification of issues.
+{: title="Already closed issues"}
 
 
 
@@ -270,12 +322,15 @@ N/A.  This document is only intended to help the WG reach consensus on the futur
 
 This document has no IANA actions.
 
+# Acknowledgments
+
+TODO acknowledge.
 
 --- back
 
 # List of YANG Next Github Issues
 
-This appendix summarizes issues from the YANG-next issue tracker.
+This appendix summarizes issues from the YANG-next issue tracker.  The summarization was created by LLM so it may not be entirely accurate.
 
 ## [Issue 1](https://github.com/netmod-wg/yang-next/issues/1)  {#issue-1}
 {:numbered="false"}
@@ -1680,8 +1735,3 @@ mac-address in both IETF and IEEE yang is defined as a string. The canonical rep
 
 - **Github Labels**: none
 - **Status**: open
-
-# Acknowledgments
-{:numbered="false"}
-
-TODO acknowledge.
