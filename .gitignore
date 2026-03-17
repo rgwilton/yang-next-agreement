@@ -22,3 +22,6 @@ draft-wilton-netmod-yang-next-agreement.xml
 package-lock.json
 report.xml
 !requirements.txt
+/out
+/.metals
+/.vscode
