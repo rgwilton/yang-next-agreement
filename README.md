@@ -1,17 +1,8 @@
 <!-- regenerate: on (set to off if you edit this file) -->
 
-# YOURNAME Drafts
+# YANG Next Agreement
 
-This is the working area for individual Internet-Drafts.
-
-## TODO - Your title
-
-* [Editor's Copy](https://rgwilton.github.io/yang-next-agreement/#go.draft-todo-yourname-protocol.html)
-* [Datatracker Page](https://datatracker.ietf.org/doc/draft-todo-yourname-protocol)
-* [Individual Draft](https://datatracker.ietf.org/doc/html/draft-todo-yourname-protocol)
-* [Compare Editor's Copy to Individual Draft](https://rgwilton.github.io/yang-next-agreement/#go.draft-todo-yourname-protocol.diff)
-
-## YANG Next Agreement
+This is the working area for the individual Internet-Draft, "YANG Next Agreement".
 
 * [Editor's Copy](https://rgwilton.github.io/yang-next-agreement/#go.draft-wilton-netmod-yang-next-agreement.html)
 * [Datatracker Page](https://datatracker.ietf.org/doc/draft-wilton-netmod-yang-next-agreement)
