@@ -37,7 +37,7 @@ informative:
 
 --- abstract
 
-The purpose of this document is to discuss and agreement on what the scope and shape the next version of YANG should take.
+The purpose of this document is to discuss and hopefully find agreement on the scope and shape of the next version of YANG.
 
 --- middle
 
