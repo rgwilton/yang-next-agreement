@@ -3,7 +3,7 @@ title: "YANG Next Agreement"
 abbrev: "YANG Next Agreement"
 category: info
 
-docname: draft-wilton-netmod-yang-next-agreement-latest
+docname: draft-ietf-netmod-yang-next-agreement-latest
 submissiontype: IETF  # also: "independent", "editorial", "IAB", or "IRTF"
 number:
 date:

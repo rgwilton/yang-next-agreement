@@ -5,12 +5,136 @@
 
 package build
 
-import mill.*, scalalib.*
+import mill.*, scalalib.*, scalajslib.*
 import uk.org.wilton.ietf.yang.mill.plugin.*
 
 object `package` extends IETF:
+  def portalScalaVersion = "3.7.3"
+
   def draft = Task.Source:
     "draft-wilton-netmod-yang-next-agreement.md"
+
+  object portal extends Module:
+    private def copyClientAssets(from: os.Path, to: os.Path): Unit =
+      os.remove.all(to)
+      os.makeDir.all(to)
+      for file <- Seq("main.js", "main.js.map") do
+        val source = from / file
+        if os.exists(source) then os.copy.over(source, to / file)
+
+    private def writeLauncher(path: os.Path, command: String): Unit =
+      os.write.over(
+        path,
+        s"""#!/usr/bin/env sh
+           |set -eu
+           |APP_DIR="$$(CDPATH= cd -- "$$(dirname -- "$$0")/.." && pwd)"
+           |PORTAL_CLIENT_ASSETS="$${PORTAL_CLIENT_ASSETS:-$$APP_DIR/assets}" exec $command "$$@"
+           |""".stripMargin
+      )
+      os.proc("chmod", "+x", path).call()
+
+    private def nativeImageCommand: String =
+      sys.env
+        .get("NATIVE_IMAGE")
+        .orElse(sys.env.get("GRAALVM_HOME").map(home => (os.Path(home) / "bin" / "native-image").toString))
+        .orElse(sys.env.get("JAVA_HOME").map(home => (os.Path(home) / "bin" / "native-image").toString))
+        .getOrElse("native-image")
+
+    private def writeNativeReflectConfig(path: os.Path): Unit =
+      os.write.over(
+        path,
+        """[
+          |  { "name": "io.undertow.UndertowLogger_$logger", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true },
+          |  { "name": "io.undertow.UndertowMessages_$bundle", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true },
+          |  { "name": "io.undertow.client.UndertowClientMessages_$bundle", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true },
+          |  { "name": "io.undertow.websockets.core.WebSocketLogger_$logger", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true },
+          |  { "name": "io.undertow.websockets.core.WebSocketMessages_$bundle", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true },
+          |  { "name": "io.undertow.server.protocol.http.HttpRequestParser$$generated", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true },
+          |  { "name": "io.undertow.client.http.HttpResponseParser$$generated", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true },
+          |  { "name": "org.xnio._private.Messages_$logger", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true },
+          |  { "name": "org.xnio.nio.Log_$logger", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true },
+          |  { "name": "org.xnio.nio.NioXnioProvider", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true },
+          |  { "name": "org.wildfly.client.config._private.ConfigMessages_$bundle", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true },
+          |  { "name": "org.wildfly.common._private.CommonMessages_$bundle", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true }
+          |]
+          |""".stripMargin
+      )
+
+    def dist = Task:
+      val linkedClient = client.fastLinkJS()
+      val assemblyJar = server.assembly().path
+      val packageDir = Task.dest / "yang-next-portal"
+      val binDir = packageDir / "bin"
+      val libDir = packageDir / "lib"
+      val assetsDir = packageDir / "assets"
+
+      os.remove.all(packageDir)
+      os.makeDir.all(binDir)
+      os.makeDir.all(libDir)
+      copyClientAssets(linkedClient.dest.path, assetsDir)
+      os.copy.over(assemblyJar, libDir / "yang-next-portal.jar")
+      writeLauncher(binDir / "yang-next-portal", """java -jar "$APP_DIR/lib/yang-next-portal.jar"""")
+      PathRef(packageDir)
+
+    def nativeImage = Task:
+      val linkedClient = client.fastLinkJS()
+      val assemblyJar = server.assembly().path
+      val sqliteJdbcJar = server
+        .runClasspath()
+        .map(_.path)
+        .find(path => path.last.startsWith("sqlite-jdbc-") && path.ext == "jar")
+        .getOrElse(throw new Exception("sqlite-jdbc jar was not found on the server runtime classpath"))
+      val xnioNioJar = server
+        .runClasspath()
+        .map(_.path)
+        .find(path => path.last.startsWith("xnio-nio-") && path.ext == "jar")
+        .getOrElse(throw new Exception("xnio-nio jar was not found on the server runtime classpath"))
+      val classpath = Seq(assemblyJar, sqliteJdbcJar, xnioNioJar).map(_.toString).mkString(java.io.File.pathSeparator)
+      val packageDir = Task.dest / "yang-next-portal-native"
+      val binDir = packageDir / "bin"
+      val assetsDir = packageDir / "assets"
+      val reflectConfig = Task.dest / "native-reflect-config.json"
+
+      os.remove.all(packageDir)
+      os.makeDir.all(binDir)
+      copyClientAssets(linkedClient.dest.path, assetsDir)
+      writeNativeReflectConfig(reflectConfig)
+      os.proc(
+        nativeImageCommand,
+        "--no-fallback",
+        "--enable-native-access=ALL-UNNAMED",
+        "--add-opens=jdk.unsupported/sun.misc=ALL-UNNAMED",
+        s"-Dorg.sqlite.lib.exportPath=$binDir",
+        "-H:IncludeResources=META-INF/services/.*|org/xnio/nio/.*\\.properties",
+        s"-H:ReflectionConfigurationFiles=$reflectConfig",
+        "--initialize-at-build-time=castor.Context,castor.Context$Simple",
+        "-o",
+        "yang-next-portal-bin",
+        "-cp",
+        classpath,
+        "portal.server.PortalServer"
+      ).call(cwd = binDir)
+      writeLauncher(binDir / "yang-next-portal", """"$APP_DIR/bin/yang-next-portal-bin"""")
+      PathRef(packageDir)
+
+    object client extends ScalaJSModule:
+      def scalaVersion = portalScalaVersion
+      def scalaJSVersion = "1.20.2"
+      def mvnDeps = Seq(
+        mvn"com.raquo::laminar::17.2.1",
+        mvn"com.lihaoyi::upickle::4.3.1"
+      )
+
+    object server extends ScalaModule:
+      def scalaVersion = portalScalaVersion
+      def mainClass = Some("portal.server.PortalServer")
+      def mvnDeps = Seq(
+        mvn"com.lihaoyi::cask::0.11.3",
+        mvn"com.lihaoyi::scalatags::0.13.1",
+        mvn"com.lihaoyi::upickle::4.3.1",
+        mvn"org.xerial:sqlite-jdbc:3.49.1.0",
+        mvn"org.slf4j:slf4j-simple:1.7.36"
+      )
 
   // All RFCs that we need to extract YANG from.
   def rfcDeps = List(
