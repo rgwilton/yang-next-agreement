@@ -164,8 +164,10 @@ object PortalServer extends cask.MainRoutes:
     }
 
   @cask.get("/auth/:provider/callback")
-  def oauthCallback(provider: String, code: String = "", state: String = "") =
+  def oauthCallback(provider: String, code: String = "", state: String = "", iss: String = "") =
     api {
+      if provider == "github" && iss.nonEmpty && iss != "https://github.com/login/oauth" then
+        throw ApiError(400, "OAuth issuer did not match GitHub.")
       val profile = AuthService.complete(provider, code, state, db)
       val sessionId = randomToken()
       db.createSession(sessionId, profile)
