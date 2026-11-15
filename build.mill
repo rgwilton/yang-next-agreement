@@ -1,7 +1,7 @@
-//| mill-version: 1.0.6
-//| mill-jvm-version: temurin:21
+//| mill-version: 1.4.0-M2
+//| mill-jvm-version: temurin:27
 //| mvnDeps:
-//| - uk.org.wilton::ietf-yang-mill-plugin::0.0.11
+//| - uk.org.wilton::ietf-yang-mill-plugin::0.0.12
 
 package build
 
@@ -9,7 +9,7 @@ import mill.*, scalalib.*, scalajslib.*
 import uk.org.wilton.ietf.yang.mill.plugin.*
 
 object `package` extends IETF:
-  def portalScalaVersion = "3.7.3"
+  def portalScalaVersion = "3.9.0"
 
   def draft = Task.Source:
     "draft-wilton-netmod-yang-next-agreement.md"
@@ -119,10 +119,10 @@ object `package` extends IETF:
 
     object client extends ScalaJSModule:
       def scalaVersion = portalScalaVersion
-      def scalaJSVersion = "1.20.2"
+      def scalaJSVersion = "1.22.0"
       def mvnDeps = Seq(
         mvn"com.raquo::laminar::17.2.1",
-        mvn"com.lihaoyi::upickle::4.3.1"
+        mvn"com.lihaoyi::upickle::4.4.3"
       )
 
     object server extends ScalaModule:
@@ -131,9 +131,9 @@ object `package` extends IETF:
       def mvnDeps = Seq(
         mvn"com.lihaoyi::cask::0.11.3",
         mvn"com.lihaoyi::scalatags::0.13.1",
-        mvn"com.lihaoyi::upickle::4.3.1",
-        mvn"org.xerial:sqlite-jdbc:3.49.1.0",
-        mvn"org.slf4j:slf4j-simple:1.7.36"
+        mvn"com.lihaoyi::upickle::4.4.3",
+        mvn"org.xerial:sqlite-jdbc:3.54.1.0",
+        mvn"org.slf4j:slf4j-simple:2.0.20"
       )
 
   // All RFCs that we need to extract YANG from.
@@ -204,11 +204,11 @@ object `package` extends IETF:
 
 
   object publisher extends ScalaModule:
-    def scalaVersion = "3.7.3"
+    def scalaVersion = "3.9.0"
     def mvnDeps = Seq(
-      mvn"com.lihaoyi::upickle:4.3.1",
-      mvn"com.lihaoyi::mainargs:0.7.6",
-      mvn"org.scala-lang.modules::scala-xml:2.3.0"
+      mvn"com.lihaoyi::upickle:4.4.3",
+      mvn"com.lihaoyi::mainargs:0.7.8",
+      mvn"org.scala-lang.modules::scala-xml:2.5.0"
     )
 
 /*
