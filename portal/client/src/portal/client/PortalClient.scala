@@ -52,7 +52,7 @@ object PortalClient:
       asideTag(
         cls := "sidebar",
         h1(cls := "title", "YANG 2.0 Issues"),
-        p(cls := "subtitle", "Classify GitHub issues, vote on the current category, and capture local discussion notes."),
+        p(cls := "subtitle", "Classify GitHub issues, share an opinion on the current category, and capture local discussion notes."),
         controls,
         issueList
       ),
@@ -448,7 +448,7 @@ object PortalClient:
       ),
       sectionTag(
         cls := "section",
-        h2("Vote On Current Classification"),
+        h2("Opinion on Current Classification"),
         div(
           cls := "vote-grid",
           voteOptions.now().map(option =>
@@ -465,7 +465,7 @@ object PortalClient:
         ),
         div(
           cls := "field",
-          label("Vote comment"),
+          label("Opinion comment"),
           textArea(
             cls := "textarea",
             value <-- voteCommentVar.signal,
@@ -476,8 +476,8 @@ object PortalClient:
           )
         ),
         consensusPanel(detail.votes),
-        collapsibleDetailPanel("Vote summary", voteSummaryOpen, voteSummaryTable(detail.voteSummary, detail.votes)),
-        collapsibleDetailPanel("Votes by contributor", votesByContributorOpen, votesTable(detail.votes))
+        collapsibleDetailPanel("Opinion summary", voteSummaryOpen, voteSummaryTable(detail.voteSummary, detail.votes)),
+        collapsibleDetailPanel("Opinions by contributor", votesByContributorOpen, votesTable(detail.votes))
       ),
       sectionTag(
         cls := "section",
@@ -578,7 +578,7 @@ object PortalClient:
     val countsByVote = rows.map(row => row.vote -> row.count).toMap.updated("Not evaluated", rows.find(_.vote == "Not evaluated").map(_.count).getOrElse(0) + implicitNotEvaluated.size)
     table(
       cls := "table vote-summary-table",
-      thead(tr(th("Vote"), th("Count"), th("Contributors"))),
+      thead(tr(th("Opinion"), th("Count"), th("Contributors"))),
       tbody(rows.map { row =>
         val contributors = contributorsByVote.getOrElse(row.vote, Nil)
         tr(
@@ -591,11 +591,11 @@ object PortalClient:
     )
 
   private def votesTable(rows: List[Vote]): HtmlElement =
-    if rows.isEmpty then div(cls := "empty", "No votes on the current classification yet.")
+    if rows.isEmpty then div(cls := "empty", "No opinions on the current classification yet.")
     else
       table(
         cls := "table votes-table",
-        thead(tr(th("Contributor"), th("Vote"), th("Updated"), th("Comment"))),
+        thead(tr(th("Contributor"), th("Opinion"), th("Updated"), th("Comment"))),
         tbody(rows.sortBy(_.contributor.toLowerCase).map(row => tr(td(row.contributor), td(displayVote(row.vote)), td(formatUtc(row.updatedAt)), td(row.comment.getOrElse("")))))
       )
 
@@ -616,7 +616,7 @@ object PortalClient:
   private def historyTable(rows: List[HistoryItem]): HtmlElement =
     table(
       cls := "table",
-      thead(tr(th("When"), th("Contributor"), th("Classification"), th("Rationale"), th("Votes"))),
+      thead(tr(th("When"), th("Contributor"), th("Classification"), th("Rationale"), th("Opinions"))),
       tbody(rows.map { row =>
         tr(
           td(formatUtc(row.createdAt)),
@@ -852,7 +852,7 @@ object PortalClient:
 
   private def voteSummaryText(rows: List[VoteCount]): String =
     val nonZero = rows.filter(_.count > 0)
-    if nonZero.isEmpty then "No votes"
+    if nonZero.isEmpty then "No opinions"
     else nonZero.map(row => s"${displayVote(row.vote)}: ${row.count}").mkString(", ")
 
   private def summarizeVotes(rows: List[Vote]): List[VoteCount] =

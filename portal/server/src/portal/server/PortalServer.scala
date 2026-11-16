@@ -46,6 +46,14 @@ object PortalServer extends cask.MainRoutes:
   def summaryPage() =
     index()
 
+  @cask.get("/issues")
+  def issuesIndex() =
+    redirect("/summary")
+
+  @cask.get("/issues/")
+  def issuesIndexWithSlash() =
+    redirect("/summary")
+
   @cask.get("/issues/:number")
   def issuePage(number: Int) =
     index()
