@@ -10,20 +10,36 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
 import java.sql.Connection
-import java.sql.DriverManager
 import java.sql.ResultSet
 import java.security.SecureRandom
 import java.time.Instant
 import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.CopyOnWriteArraySet
 import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
+import scala.util.Using
 
 import scalatags.Text.all.*
 
-object PortalServer extends cask.MainRoutes:
+object PortalServer extends cask.Main:
+  override def port: Int = sys.env.get("YANG_PORTAL_PORT").map(_.toInt).getOrElse(8080)
+  override def debugMode: Boolean = false
+  private val authPath = AccessDb.defaultPath.toAbsolutePath.normalize()
+  private val issuePath = PortalDb.defaultPath.toAbsolutePath.normalize()
+  require(authPath != issuePath && !(Files.exists(authPath) && Files.exists(issuePath) && Files.isSameFile(authPath, issuePath)),
+    "The access database must be separate from the issue database.")
   private val db = PortalDb.default
+  require(!(Files.exists(authPath) && Files.isSameFile(authPath, issuePath)),
+    "The access database must be separate from the issue database.")
+  val allRoutes = Seq(new PortalRoutes(db, AccessDb.default))
+
+object PortalSettings:
+  def baseUrl: String = sys.env.getOrElse("YANG_PORTAL_BASE_URL", "http://127.0.0.1:8080").stripSuffix("/")
+
+final class PortalRoutes(private val db: PortalDb, private val access: AccessDb,
+                         private val auth: OAuthService = AuthService,
+                         private val portalBaseUrl: String = PortalSettings.baseUrl) extends cask.Routes:
+  db.migrateLegacyAuthentication(access)
 
   @cask.get("/")
   def index() =
@@ -54,6 +70,71 @@ object PortalServer extends cask.MainRoutes:
   def issuePage(number: Int) =
     index()
 
+  @cask.get("/admin/users")
+  def adminPage(request: cask.Request) = api {
+    requireUser(request, PortalRole.Administrator)
+    index()
+  }
+
+  @cask.get("/api/admin/users")
+  def adminUsers(request: cask.Request) = api {
+    requireUser(request, PortalRole.Administrator)
+    jsonResponse(ujson.Obj("users" -> ujson.Arr.from(access.users().map(_.json)), "changes" -> access.changes()).render())
+  }
+
+  @cask.post("/api/admin/users/:userId/role")
+  def setUserRole(userId: String, request: cask.Request) = api {
+    val actor = requireUser(request, PortalRole.Administrator, write = true)
+    val role = PortalRole.parse(requiredString(jsonBody(request), "role"))
+    access.changeRole(actor.id, userId, role)
+    PortalEvents.accessChanged()
+    jsonResponse(ujson.Obj("ok" -> true).render())
+  }
+
+  @cask.post("/api/admin/users/:userId/password")
+  def resetLocalUserPassword(userId: String, request: cask.Request) = api {
+    val actor = requireUser(request, PortalRole.Administrator, write = true)
+    access.resetLocalUserPassword(actor.id, userId, rawPassword(jsonBody(request)))
+    PortalEvents.accessChanged()
+    jsonResponse(ujson.Obj("ok" -> true).render())
+  }
+
+  @cask.post("/api/admin/users/local")
+  def createLocalUser(request: cask.Request) = api {
+    val actor = requireUser(request, PortalRole.Administrator, write = true)
+    val body = jsonBody(request)
+    val user = access.createLocalAccount(actor.id, requiredString(body, "identifier"), rawPassword(body),
+      optionalString(body, "name"), optionalString(body, "email"))
+    cask.Response(ujson.Obj("user" -> user.json).render(), statusCode = 201,
+      headers = noCacheHeaders("application/json; charset=utf-8"))
+  }
+
+  @cask.post("/api/auth/local/login")
+  def localLogin(request: cask.Request) = api {
+    requireWrite(request)
+    limitLocalAuth(request)
+    val body = jsonBody(request)
+    val identifier = requiredString(body, "identifier")
+    access.limitAuthentication("account:" + identifier.toLowerCase(java.util.Locale.ROOT), 10)
+    signedIn(access.loginLocal(identifier, rawPassword(body)))
+  }
+
+  private def jsonBody(request: cask.Request): collection.Map[String, ujson.Value] =
+    request.exchange.setMaxEntitySize(65536)
+    ujson.read(request.text()).obj
+
+  private def rawPassword(body: collection.Map[String, ujson.Value]): String =
+    body.get("password").collect { case ujson.Str(value) => value }.getOrElse(fail(400, "Password is required."))
+
+  private def limitLocalAuth(request: cask.Request): Unit =
+    access.limitAuthentication("address:" + request.exchange.getSourceAddress.getAddress.getHostAddress, 30)
+
+  private def signedIn(user: PortalUser): cask.Response[String] =
+    val token = randomToken()
+    access.createUserSession(token, user.id)
+    cask.Response(ujson.Obj("session" -> user.json).render(),
+      headers = noCacheHeaders("application/json; charset=utf-8") :+ ("Set-Cookie" -> sessionCookie(token)))
+
   @cask.get("/assets/:file")
   def asset(file: String) =
     if file == "style.css" then
@@ -71,88 +152,104 @@ object PortalServer extends cask.MainRoutes:
           jsonError(404, s"Asset $safeName was not found. Run ./mill portal.client.fastLinkJS first.")
 
   @cask.get("/api/issues")
-  def issues() =
-    jsonResponse(db.listIssues().render())
+  def issues(request: cask.Request) = api {
+    requireUser(request)
+    jsonResponse(withIdentities(db.listIssues()).render())
+  }
 
   @cask.get("/api/session")
   def session(request: cask.Request) =
-    val current = sessionCookie(request).flatMap(db.findSession)
+    val current = sessionCookie(request).flatMap(access.findSession)
     jsonResponse(ujson.Obj(
-      "session" -> current.map(sessionJson).getOrElse(ujson.Null),
+      "session" -> current.map(_.json).getOrElse(ujson.Null),
       "providers" -> ujson.Obj(
-        "github" -> AuthService.isConfigured("github"),
-        "google" -> AuthService.isConfigured("google")
+        "github" -> auth.isConfigured("github"),
+        "google" -> auth.isConfigured("google")
       )
     ).render())
 
   @cask.post("/api/logout")
-  def logout(request: cask.Request) =
-    sessionCookie(request).foreach(db.deleteSession)
+  def logout(request: cask.Request) = api {
+    requireWrite(request)
+    sessionCookie(request).foreach(access.deleteSession)
+    PortalEvents.accessChanged()
     cask.Response(
       ujson.Obj("ok" -> true).render(),
-      headers = Seq("Content-Type" -> "application/json; charset=utf-8", "Set-Cookie" -> expiredSessionCookie)
+      headers = noCacheHeaders("application/json; charset=utf-8") :+ ("Set-Cookie" -> expiredSessionCookie)
     )
 
+  }
+
   @cask.get("/api/issues/:number")
-  def issue(number: Int) =
+  def issue(number: Int, request: cask.Request) = api {
+    requireUser(request)
     db.issueDetail(number) match
-      case Some(value) => jsonResponse(value.render())
+      case Some(value) => jsonResponse(withIdentities(value).render())
       case None        => jsonError(404, s"Issue $number was not found")
+
+  }
 
   @cask.post("/api/issues/:number/classification")
   def classify(number: Int, request: cask.Request) =
     api {
-      val body = ujson.read(request.text()).obj
-      val contributor = authenticatedContributor(request, body)
+      val user = requireUser(request, PortalRole.Consensus, write = true)
+      val body = jsonBody(request)
       val category = requiredString(body, "category")
       val subgroup = optionalString(body, "subgroup")
       val rationale = optionalString(body, "rationale").getOrElse("")
       validateChoice(category, PortalData.categories, "category")
       subgroup.foreach(validateChoice(_, PortalData.subgroups, "subgroup"))
-      db.setClassification(number, contributor, category, subgroup, rationale)
-      jsonResponse(db.issueDetail(number).get.render())
+      db.setClassification(number, user.displayName, category, subgroup, rationale, Some(user.id))
+      jsonResponse(withIdentities(db.issueDetail(number).get).render())
     }
 
   @cask.post("/api/issues/:number/comments")
   def comment(number: Int, request: cask.Request) =
     api {
-      val body = ujson.read(request.text()).obj
-      val contributor = authenticatedContributor(request, body)
+      val user = requireUser(request, PortalRole.Opinion, write = true)
+      val body = jsonBody(request)
       val text = requiredString(body, "body")
       if text.trim.isEmpty then fail(400, "Comment body must not be empty")
-      db.addComment(number, contributor, text.trim)
-      jsonResponse(db.issueDetail(number).get.render())
+      db.addComment(number, user.displayName, text.trim, Some(user.id))
+      jsonResponse(withIdentities(db.issueDetail(number).get).render())
     }
 
   @cask.post("/api/issues/:number/sync-github-comments")
-  def syncGithubComments(number: Int) =
+  def syncGithubComments(number: Int, request: cask.Request) =
     api {
+      requireUser(request, PortalRole.Administrator, write = true)
       val count = GitHubIssueComments.sync(db, number)
-      jsonResponse(db.issueDetail(number).get.render())
+      jsonResponse(withIdentities(db.issueDetail(number).get).render())
     }
 
   @cask.post("/api/issues/:number/vote")
   def vote(number: Int, request: cask.Request) =
     api {
-      val body = ujson.read(request.text()).obj
-      val contributor = authenticatedContributor(request, body)
+      val user = requireUser(request, PortalRole.Opinion, write = true)
+      val body = jsonBody(request)
       val vote = requiredString(body, "vote")
       val comment = optionalString(body, "comment").getOrElse("")
       validateChoice(vote, PortalData.voteOptions, "vote")
-      db.setVote(number, contributor, vote, comment) match
+      db.setVote(number, user.displayName, vote, comment, Some(user.id)) match
         case Left(message) => jsonError(409, message)
         case Right(()) =>
           PortalEvents.issueUpdated(number, "vote")
-          jsonResponse(db.issueDetail(number).get.render())
+          jsonResponse(withIdentities(db.issueDetail(number).get).render())
     }
 
   @cask.websocket("/api/events")
-  def events() =
-    PortalEvents.handler()
+  def events(request: cask.Request): cask.WebsocketResult =
+    val token = sessionCookie(request)
+    val user = token.flatMap(access.findSession)
+    if user.isEmpty then cask.Response("Sign in to continue.", statusCode = 401)
+    else if request.headers.get("origin").orElse(request.headers.get("Origin")).flatMap(_.headOption).exists(_ != portalBaseUrl) then
+      cask.Response("Invalid WebSocket origin.", statusCode = 403)
+    else PortalEvents.handler(access, token.get)
 
   @cask.post("/api/sync/github")
-  def syncGithub() =
+  def syncGithub(request: cask.Request) =
     api {
+      requireUser(request, PortalRole.Administrator, write = true)
       val count = GitHubIssues.sync(db)
       val seeded = db.seedDraftClassifications(DraftClassifications.load())
       val backfilled = db.backfillDraftSubgroups(DraftClassifications.load())
@@ -161,20 +258,29 @@ object PortalServer extends cask.MainRoutes:
 
   @cask.get("/auth/:provider/start")
   def oauthStart(provider: String) =
+    // Establish the cookie on the callback origin, including when the portal was opened
+    // using an alias such as localhost instead of 127.0.0.1. Do this before minting state.
+    redirect(s"$portalBaseUrl/auth/$provider/authorize")
+
+  @cask.get("/auth/:provider/authorize")
+  def oauthAuthorize(provider: String) =
     api {
-      AuthService.authorizationUrl(provider, db) match
+      val browserState = randomToken()
+      auth.authorizationUrl(provider, access, browserState) match
         case Left(message) => redirect(s"/?authError=${urlEncode(message)}")
-        case Right(url)    => redirect(url)
+        case Right(url)    => redirect(url, Seq("Set-Cookie" -> s"yang_portal_oauth=$browserState; Path=/auth/; HttpOnly; SameSite=Lax; Max-Age=600$secureCookie"))
     }
 
   @cask.get("/auth/:provider/callback")
-  def oauthCallback(provider: String, code: String = "", state: String = "", iss: String = "") =
+  def oauthCallback(provider: String, request: cask.Request, code: String = "", state: String = "", iss: String = "") =
     api {
       if provider == "github" && iss.nonEmpty && iss != "https://github.com/login/oauth" then
         throw ApiError(400, "OAuth issuer did not match GitHub.")
-      val profile = AuthService.complete(provider, code, state, db)
+      if state.isEmpty || !cookie(request, "yang_portal_oauth").contains(state) then
+        fail(400, "OAuth browser state was invalid. Start sign-in again.")
+      val profile = auth.complete(provider, code, state, access)
       val sessionId = randomToken()
-      db.createSession(sessionId, profile)
+      access.createSession(sessionId, profile)
       redirect("/", Seq("Set-Cookie" -> sessionCookie(sessionId)))
     }
 
@@ -191,32 +297,52 @@ object PortalServer extends cask.MainRoutes:
     if !allowed.contains(value) then
       fail(400, s"Invalid $name: $value")
 
-  private def authenticatedContributor(request: cask.Request, body: collection.Map[String, ujson.Value]): String =
-    sessionCookie(request)
-      .flatMap(db.findSession)
-      .map(_.displayName)
-      .getOrElse(requiredString(body, "contributor"))
+  private def requireWrite(request: cask.Request): Unit =
+    AccessPolicy.requireWriteHeader(request.headers.get("x-yang-portal").orElse(request.headers.get("X-Yang-Portal")).flatMap(_.headOption))
+
+  private def requireUser(request: cask.Request, role: PortalRole = PortalRole.Visitor, write: Boolean = false): PortalUser =
+    val user = AccessPolicy.requireUser(sessionCookie(request).flatMap(access.findSession), role)
+    if write then requireWrite(request)
+    user
 
   private def api(result: => cask.Response[String]) =
     try result
     catch
       case e: ApiError => jsonError(e.status, e.getMessage)
-      case NonFatal(e) => jsonError(500, e.getMessage)
+      case _: ujson.ParseException => jsonError(400, "Invalid JSON request")
+      case _: ujson.Value.InvalidData => jsonError(400, "Invalid request field")
+      case _: io.undertow.server.RequestTooBigException => jsonError(413, "Request body is too large")
+      case NonFatal(e) =>
+        e.printStackTrace()
+        jsonError(500, "The request could not be completed.")
 
   private def fail(status: Int, message: String): Nothing =
     throw ApiError(status, message)
 
+  private def withIdentities(value: ujson.Value): ujson.Value =
+    val cache = collection.mutable.Map.empty[String, Option[ujson.Value]]
+    def enrich(item: ujson.Value): Unit = item match
+      case obj: ujson.Obj =>
+        obj.value.values.toList.foreach(enrich)
+        obj.value.get("userId").collect { case ujson.Str(id) => id }.foreach { id =>
+          obj("identity") = cache.getOrElseUpdate(id, access.publicIdentity(id)).getOrElse(ujson.Null)
+        }
+      case arr: ujson.Arr => arr.value.foreach(enrich)
+      case _ => ()
+    enrich(value)
+    value
+
   private def jsonResponse(body: String) =
-    cask.Response(body, headers = Seq("Content-Type" -> "application/json; charset=utf-8"))
+    cask.Response(body, headers = noCacheHeaders("application/json; charset=utf-8"))
 
   private def htmlResponse(body: String) =
     cask.Response(body, headers = noCacheHeaders("text/html; charset=utf-8"))
 
   private def redirect(location: String, extraHeaders: Seq[(String, String)] = Nil) =
-    cask.Response("", statusCode = 302, headers = Seq("Location" -> location) ++ extraHeaders)
+    cask.Response("", statusCode = 302, headers = Seq("Location" -> location, "Cache-Control" -> "no-store") ++ extraHeaders)
 
   private def jsonError(status: Int, message: String) =
-    cask.Response(ujson.Obj("error" -> message).render(), statusCode = status, headers = Seq("Content-Type" -> "application/json; charset=utf-8"))
+    cask.Response(ujson.Obj("error" -> message).render(), statusCode = status, headers = noCacheHeaders("application/json; charset=utf-8"))
 
   private def noCacheHeaders(contentType: String): Seq[(String, String)] =
     Seq(
@@ -224,27 +350,18 @@ object PortalServer extends cask.MainRoutes:
       "Cache-Control" -> "no-store"
     )
 
-  private def sessionJson(session: PortalSession): ujson.Value =
-    ujson.Obj(
-      "provider" -> session.provider,
-      "displayName" -> session.displayName,
-      "email" -> session.email.map(ujson.Str(_)).getOrElse(ujson.Null)
-    )
+  private def cookie(request: cask.Request, name: String): Option[String] =
+    request.cookies.get(name).map(_.value)
 
-  private def sessionCookie(request: cask.Request): Option[String] =
-    request.headers
-      .get("Cookie")
-      .orElse(request.headers.get("cookie"))
-      .flatMap(_.headOption)
-      .flatMap { cookie =>
-        cookie.split(";").iterator.map(_.trim).find(_.startsWith("yang_portal_session=")).map(_.stripPrefix("yang_portal_session="))
-      }
+  private def sessionCookie(request: cask.Request): Option[String] = cookie(request, "yang_portal_session")
+
+  private def secureCookie: String = if portalBaseUrl.startsWith("https://") then "; Secure" else ""
 
   private def sessionCookie(sessionId: String): String =
-    s"yang_portal_session=$sessionId; Path=/; HttpOnly; SameSite=Lax"
+    s"yang_portal_session=$sessionId; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000$secureCookie"
 
   private def expiredSessionCookie: String =
-    "yang_portal_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"
+    s"yang_portal_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax$secureCookie"
 
   private def randomToken(): String =
     val bytes = Array.ofDim[Byte](32)
@@ -259,60 +376,57 @@ object PortalServer extends cask.MainRoutes:
   initialize()
 
 object PortalEvents:
-  private val clients = CopyOnWriteArraySet[cask.endpoints.WsChannelActor]()
-  private val identities = ConcurrentHashMap[cask.endpoints.WsChannelActor, String]()
+  private val clients = ConcurrentHashMap[cask.endpoints.WsChannelActor, (AccessDb, String)]()
   private val context = castor.Context.Simple.global
   private val logger: cask.util.Logger = cask.Logger.Console.globalLogger
 
-  def handler(): cask.WsHandler =
+  def handler(access: AccessDb, token: String): cask.WsHandler =
     new cask.endpoints.WsHandler(
       (channel: cask.endpoints.WsChannelActor) =>
-        clients.add(channel)
-        channel.send(cask.Ws.Text(ujson.Obj("type" -> "connected").render()))
-        sendConnectedUsers(channel)
+        clients.put(channel, (access, token))
+        broadcastConnectedUsers()
         new cask.endpoints.WsActor({
           case cask.Ws.ChannelClosed() =>
             clients.remove(channel)
-            identities.remove(channel)
             broadcastConnectedUsers()
           case cask.Ws.Error(_) =>
             clients.remove(channel)
-            identities.remove(channel)
             broadcastConnectedUsers()
-          case cask.Ws.Text(text) =>
-            handleMessage(channel, text)
-          case _ =>
-            ()
+          case cask.Ws.Text(_) =>
+            // Identity comes from the server session, never a client-supplied name.
+            broadcastConnectedUsers()
+          case _ => ()
         }: PartialFunction[cask.util.Ws.Event, Unit])(using context, logger)
     )(using context, logger)
 
   def issueUpdated(number: Int, reason: String): Unit =
-    val message = cask.Ws.Text(ujson.Obj("type" -> "issue-updated", "number" -> number, "reason" -> reason).render())
-    clients.forEach { client =>
-      try client.send(message)
-      catch case NonFatal(_) => clients.remove(client)
+    broadcast(ujson.Obj("type" -> "issue-updated", "number" -> number, "reason" -> reason))
+
+  def accessChanged(): Unit =
+    broadcast(ujson.Obj("type" -> "access-changed"))
+    broadcastConnectedUsers()
+
+  private def authenticatedClients: Seq[(cask.endpoints.WsChannelActor, PortalUser)] =
+    clients.entrySet().asScala.toSeq.flatMap { entry =>
+      val (access, token) = entry.getValue
+      access.findSession(token) match
+        case Some(user) => Some(entry.getKey -> user)
+        case None =>
+          clients.remove(entry.getKey)
+          entry.getKey.send(cask.Ws.Close(1008, "Sign in again"))
+          None
     }
 
-  private def handleMessage(channel: cask.endpoints.WsChannelActor, text: String): Unit =
-    try
-      val message = ujson.read(text)
-      if message.obj.get("type").exists(_.str == "identify") then
-        val contributor = message.obj.get("contributor").map(_.str.trim).getOrElse("")
-        if contributor.isEmpty then identities.remove(channel) else identities.put(channel, contributor)
-        broadcastConnectedUsers()
-    catch case NonFatal(_) => ()
-
-  private def connectedUsersJson: ujson.Value =
-    val users = identities.values().asScala.toSeq.distinct.sortBy(_.toLowerCase)
-    ujson.Obj("type" -> "connected-users", "users" -> ujson.Arr.from(users))
-
-  private def sendConnectedUsers(channel: cask.endpoints.WsChannelActor): Unit =
-    try channel.send(cask.Ws.Text(connectedUsersJson.render()))
-    catch case NonFatal(_) => clients.remove(channel)
-
   private def broadcastConnectedUsers(): Unit =
-    val message = cask.Ws.Text(connectedUsersJson.render())
-    clients.forEach { client =>
+    val users = authenticatedClients.map(_._2).filter(_.role.permits(PortalRole.Opinion))
+      .groupBy(_.id).values.map(_.head).toSeq.sortBy(_.displayName.toLowerCase)
+    broadcast(ujson.Obj("type" -> "connected-users", "users" -> ujson.Arr.from(users.map(user =>
+      ujson.Obj("id" -> user.id, "displayName" -> user.displayName,
+        "provider" -> user.provider, "identifier" -> PublicIdentity.identifier(user.identifier))))))
+
+  private def broadcast(value: ujson.Value): Unit =
+    val message = cask.Ws.Text(value.render())
+    authenticatedClients.foreach { (client, _) =>
       try client.send(message)
       catch case NonFatal(_) => clients.remove(client)
     }
@@ -381,14 +495,14 @@ final class PortalDb private (dbPath: Path):
       }
     }
 
-  def setClassification(number: Int, contributor: String, category: String, subgroup: Option[String], rationale: String): Unit =
+  def setClassification(number: Int, contributor: String, category: String, subgroup: Option[String], rationale: String, userId: Option[String] = None): Unit =
     ensureIssue(number)
     withConn { conn =>
       freezeCurrentVotes(conn, number)
       val ps = conn.prepareStatement(
         """insert into classification_revisions
-          |(issue_number, category, subgroup, rationale, contributor, created_at, vote_snapshot)
-          |values (?, ?, ?, ?, ?, ?, ?)""".stripMargin
+          |(issue_number, category, subgroup, rationale, contributor, created_at, vote_snapshot, contributor_user_id)
+          |values (?, ?, ?, ?, ?, ?, ?, ?)""".stripMargin
       )
       ps.setInt(1, number)
       ps.setString(2, category)
@@ -397,6 +511,7 @@ final class PortalDb private (dbPath: Path):
       ps.setString(5, contributor)
       ps.setString(6, now())
       ps.setString(7, "[]")
+      ps.setString(8, userId.orNull)
       ps.executeUpdate()
     }
 
@@ -447,14 +562,15 @@ final class PortalDb private (dbPath: Path):
       updated
     }
 
-  def addComment(number: Int, contributor: String, text: String): Unit =
+  def addComment(number: Int, contributor: String, text: String, userId: Option[String] = None): Unit =
     ensureIssue(number)
     withConn { conn =>
-      val ps = conn.prepareStatement("insert into comments(issue_number, contributor, body, created_at) values (?, ?, ?, ?)")
+      val ps = conn.prepareStatement("insert into comments(issue_number, contributor, body, created_at, contributor_user_id) values (?, ?, ?, ?, ?)")
       ps.setInt(1, number)
       ps.setString(2, contributor)
       ps.setString(3, text)
       ps.setString(4, now())
+      ps.setString(5, userId.orNull)
       ps.executeUpdate()
     }
 
@@ -483,7 +599,7 @@ final class PortalDb private (dbPath: Path):
       ps.executeUpdate()
     }
 
-  def setVote(number: Int, contributor: String, vote: String, comment: String): Either[String, Unit] =
+  def setVote(number: Int, contributor: String, vote: String, comment: String, userId: Option[String] = None): Either[String, Unit] =
     withConn { conn =>
       val revision = currentRevisionId(conn, number)
       revision match
@@ -491,10 +607,10 @@ final class PortalDb private (dbPath: Path):
           Left("Classify the issue before voting on it")
         case Some(revisionId) =>
           val ps = conn.prepareStatement(
-            """insert into votes(revision_id, issue_number, contributor, vote, vote_comment, updated_at)
-              |values (?, ?, ?, ?, ?, ?)
-              |on conflict(revision_id, contributor)
-              |do update set vote = excluded.vote,
+            """insert into votes(revision_id, issue_number, contributor, vote, vote_comment, updated_at, contributor_user_id)
+              |values (?, ?, ?, ?, ?, ?, ?)
+              |on conflict(revision_id, contributor_user_id)
+              |do update set contributor = excluded.contributor, vote = excluded.vote,
               |              vote_comment = excluded.vote_comment,
               |              updated_at = excluded.updated_at""".stripMargin
           )
@@ -504,6 +620,7 @@ final class PortalDb private (dbPath: Path):
           ps.setString(4, vote)
           ps.setString(5, comment.trim)
           ps.setString(6, now())
+          ps.setString(7, userId.orNull)
           ps.executeUpdate()
           Right(())
     }
@@ -533,51 +650,13 @@ final class PortalDb private (dbPath: Path):
       ps.executeUpdate()
     }
 
-  def createOAuthState(state: String, provider: String): Unit =
+  def migrateLegacyAuthentication(access: AccessDb): Unit =
     withConn { conn =>
-      val ps = conn.prepareStatement("insert into oauth_states(state, provider, created_at) values (?, ?, ?)")
-      ps.setString(1, state)
-      ps.setString(2, provider)
-      ps.setString(3, now())
-      ps.executeUpdate()
-    }
-
-  def consumeOAuthState(state: String, provider: String): Boolean =
-    withConn { conn =>
-      val matches = scalarLong(conn, "select count(*) from oauth_states where state = ? and provider = ?", state, provider) > 0
-      val ps = conn.prepareStatement("delete from oauth_states where state = ?")
-      ps.setString(1, state)
-      ps.executeUpdate()
-      matches
-    }
-
-  def createSession(sessionId: String, profile: OAuthProfile): Unit =
-    withConn { conn =>
-      val ps = conn.prepareStatement(
-        """insert into auth_sessions(session_id, provider, provider_user_id, display_name, email, created_at)
-          |values (?, ?, ?, ?, ?, ?)""".stripMargin
-      )
-      ps.setString(1, sessionId)
-      ps.setString(2, profile.provider)
-      ps.setString(3, profile.providerUserId)
-      ps.setString(4, profile.displayName)
-      profile.email.fold(ps.setNull(5, java.sql.Types.VARCHAR))(ps.setString(5, _))
-      ps.setString(6, now())
-      ps.executeUpdate()
-    }
-
-  def findSession(sessionId: String): Option[PortalSession] =
-    withConn { conn =>
-      queryOne(conn, "select provider, display_name, email from auth_sessions where session_id = ?", sessionId) { rs =>
-        PortalSession(rs.getString("provider"), rs.getString("display_name"), Option(rs.getString("email")))
-      }
-    }
-
-  def deleteSession(sessionId: String): Unit =
-    withConn { conn =>
-      val ps = conn.prepareStatement("delete from auth_sessions where session_id = ?")
-      ps.setString(1, sessionId)
-      ps.executeUpdate()
+      // Old issue-database sessions did not store handles. Discard them; GitHub users
+      // receive Visitor accounts on their next authenticated sign-in.
+      conn.createStatement().execute("pragma secure_delete=on")
+      conn.createStatement().execute("drop table if exists auth_sessions")
+      conn.createStatement().execute("drop table if exists oauth_states")
     }
 
   private def init(): Unit =
@@ -625,6 +704,26 @@ final class PortalDb private (dbPath: Path):
       )
       if !columnExists(conn, "votes", "vote_comment") then
         conn.createStatement().execute("alter table votes add column vote_comment text not null default ''")
+      if !columnExists(conn, "votes", "contributor_user_id") then
+        conn.createStatement().execute("begin immediate")
+        try
+          conn.createStatement().execute("""create table votes_owned(
+            id integer primary key autoincrement,
+            revision_id integer not null references classification_revisions(id),
+            issue_number integer not null references issues(number), contributor text not null,
+            vote text not null, vote_comment text not null default '', updated_at text not null,
+            contributor_user_id text, unique(revision_id,contributor_user_id))""")
+          conn.createStatement().execute("""insert into votes_owned(id,revision_id,issue_number,contributor,vote,vote_comment,updated_at)
+            select id,revision_id,issue_number,contributor,vote,vote_comment,updated_at from votes""")
+          conn.createStatement().execute("drop table votes")
+          conn.createStatement().execute("alter table votes_owned rename to votes")
+          conn.createStatement().execute("commit")
+        catch
+          case e: Throwable =>
+            conn.createStatement().execute("rollback")
+            throw e
+      if !columnExists(conn, "classification_revisions", "contributor_user_id") then
+        conn.createStatement().execute("alter table classification_revisions add column contributor_user_id text")
       backfillVoteSnapshots(conn)
       conn.createStatement().execute(
         """create table if not exists comments(
@@ -635,6 +734,8 @@ final class PortalDb private (dbPath: Path):
           |created_at text not null
           |)""".stripMargin
       )
+      if !columnExists(conn, "comments", "contributor_user_id") then
+        conn.createStatement().execute("alter table comments add column contributor_user_id text")
       conn.createStatement().execute(
         """create table if not exists github_comments(
           |comment_id integer primary key,
@@ -647,23 +748,7 @@ final class PortalDb private (dbPath: Path):
           |cached_at text not null
           |)""".stripMargin
       )
-      conn.createStatement().execute(
-        """create table if not exists oauth_states(
-          |state text primary key,
-          |provider text not null,
-          |created_at text not null
-          |)""".stripMargin
-      )
-      conn.createStatement().execute(
-        """create table if not exists auth_sessions(
-          |session_id text primary key,
-          |provider text not null,
-          |provider_user_id text not null,
-          |display_name text not null,
-          |email text,
-          |created_at text not null
-          |)""".stripMargin
-      )
+
     }
 
   private def issueSummary(conn: Connection, rs: ResultSet): ujson.Value =
@@ -704,6 +789,7 @@ final class PortalDb private (dbPath: Path):
   private def classificationJson(rs: ResultSet): ujson.Value =
     ujson.Obj(
       "revisionId" -> rs.getLong("id"),
+      "userId" -> Option(rs.getString("contributor_user_id")).map(ujson.Str(_)).getOrElse(ujson.Null),
       "category" -> rs.getString("category"),
       "subgroup" -> Option(rs.getString("subgroup")).map(ujson.Str(_)).getOrElse(ujson.Null),
       "rationale" -> rs.getString("rationale"),
@@ -729,9 +815,10 @@ final class PortalDb private (dbPath: Path):
     ))
 
   private def votes(conn: Connection, revisionId: Long): ujson.Value =
-    ujson.Arr.from(query(conn, "select contributor, vote, vote_comment, updated_at from votes where revision_id = ? order by contributor", revisionId) { rs =>
+    ujson.Arr.from(query(conn, "select contributor, contributor_user_id, vote, vote_comment, updated_at from votes where revision_id = ? order by contributor", revisionId) { rs =>
       ujson.Obj(
         "contributor" -> rs.getString("contributor"),
+        "userId" -> Option(rs.getString("contributor_user_id")).map(ujson.Str(_)).getOrElse(ujson.Null),
         "vote" -> normalizeVote(rs.getString("vote")),
         "comment" -> rs.getString("vote_comment"),
         "updatedAt" -> rs.getString("updated_at")
@@ -739,8 +826,8 @@ final class PortalDb private (dbPath: Path):
     })
 
   private def comments(conn: Connection, number: Int): ujson.Value =
-    ujson.Arr.from(query(conn, "select contributor, body, created_at from comments where issue_number = ? order by id", number) { rs =>
-      ujson.Obj("contributor" -> rs.getString("contributor"), "body" -> rs.getString("body"), "createdAt" -> rs.getString("created_at"))
+    ujson.Arr.from(query(conn, "select contributor, contributor_user_id, body, created_at from comments where issue_number = ? order by id", number) { rs =>
+      ujson.Obj("contributor" -> rs.getString("contributor"), "userId" -> Option(rs.getString("contributor_user_id")).map(ujson.Str(_)).getOrElse(ujson.Null), "body" -> rs.getString("body"), "createdAt" -> rs.getString("created_at"))
     })
 
   private def githubComments(conn: Connection, number: Int): ujson.Value =
@@ -798,18 +885,20 @@ final class PortalDb private (dbPath: Path):
     finally conn.close()
 
   private def query[A](conn: Connection, sql: String, params: Any*)(read: ResultSet => A): Seq[A] =
-    val ps = conn.prepareStatement(sql)
-    params.zipWithIndex.foreach { case (value, index) => bind(ps, index + 1, value) }
-    val rs = ps.executeQuery()
-    val out = Seq.newBuilder[A]
-    while rs.next() do out += read(rs)
-    out.result()
+    Using.resource(conn.prepareStatement(sql)) { ps =>
+      params.zipWithIndex.foreach { case (value, index) => bind(ps, index + 1, value) }
+      Using.resource(ps.executeQuery()) { rs =>
+        val out = Seq.newBuilder[A]
+        while rs.next() do out += read(rs)
+        out.result()
+      }
+    }
 
   private def queryOne[A](conn: Connection, sql: String, params: Any*)(read: ResultSet => A): Option[A] =
-    val ps = conn.prepareStatement(sql)
-    params.zipWithIndex.foreach { case (value, index) => bind(ps, index + 1, value) }
-    val rs = ps.executeQuery()
-    if rs.next() then Some(read(rs)) else None
+    Using.resource(conn.prepareStatement(sql)) { ps =>
+      params.zipWithIndex.foreach { case (value, index) => bind(ps, index + 1, value) }
+      Using.resource(ps.executeQuery()) { rs => if rs.next() then Some(read(rs)) else None }
+    }
 
   private def scalarLong(conn: Connection, sql: String, params: Any*): Long =
     queryOne(conn, sql, params*)(_.getLong(1)).getOrElse(0L)
@@ -831,28 +920,31 @@ final class PortalDb private (dbPath: Path):
     Instant.now().toString
 
 object PortalDb:
-  def default: PortalDb =
-    val configured = sys.env.get("YANG_PORTAL_DB").map(Paths.get(_))
-    new PortalDb(configured.getOrElse(Paths.get("portal-data", "yang-next.sqlite")))
+  def defaultPath: Path = sys.env.get("YANG_PORTAL_DB").map(Paths.get(_)).getOrElse(Paths.get("portal-data", "yang-next.sqlite"))
+  def default: PortalDb = new PortalDb(defaultPath)
+  private[server] def open(path: Path): PortalDb = new PortalDb(path)
 
 final case class GitHubLabel(name: String, color: String)
 final case class GitHubIssue(number: Int, title: String, url: String, state: String, labels: Seq[GitHubLabel], body: String, updatedAt: String)
 final case class GitHubComment(id: Long, issueNumber: Int, author: String, body: String, url: String, createdAt: String, updatedAt: String)
-final case class OAuthProfile(provider: String, providerUserId: String, displayName: String, email: Option[String])
-final case class PortalSession(provider: String, displayName: String, email: Option[String])
+final case class OAuthProfile(provider: String, identifier: String, displayName: String, email: Option[String])
 final case class OAuthConfig(provider: String, clientId: String, clientSecret: String, authUrl: String, tokenUrl: String, userUrl: String, scope: String)
 
-object AuthService:
+trait OAuthService:
+  def isConfigured(provider: String): Boolean
+  def authorizationUrl(provider: String, db: AccessDb, state: String): Either[String, String]
+  def complete(provider: String, code: String, state: String, db: AccessDb): OAuthProfile
+
+object AuthService extends OAuthService:
   private val client = HttpClient.newHttpClient()
 
   def isConfigured(provider: String): Boolean =
     config(provider).isDefined
 
-  def authorizationUrl(provider: String, db: PortalDb): Either[String, String] =
+  def authorizationUrl(provider: String, db: AccessDb, state: String): Either[String, String] =
     config(provider) match
       case None => Left(s"${provider.capitalize} OAuth is not configured on this server.")
       case Some(cfg) =>
-        val state = randomToken()
         db.createOAuthState(state, provider)
         val params = Seq(
           "client_id" -> cfg.clientId,
@@ -863,7 +955,7 @@ object AuthService:
         )
         Right(s"${cfg.authUrl}?${form(params)}")
 
-  def complete(provider: String, code: String, state: String, db: PortalDb): OAuthProfile =
+  def complete(provider: String, code: String, state: String, db: AccessDb): OAuthProfile =
     val cfg = config(provider).getOrElse(throw ApiError(400, s"${provider.capitalize} OAuth is not configured on this server."))
     if code.trim.isEmpty then throw ApiError(400, "OAuth callback did not include a code.")
     if state.trim.isEmpty || !db.consumeOAuthState(state, provider) then throw ApiError(400, "OAuth state was invalid or expired.")
@@ -935,7 +1027,7 @@ object AuthService:
       case "github" =>
         val login = obj("login").str
         val name = optionalJsonString(obj.get("name")).filter(_.nonEmpty).getOrElse(login)
-        OAuthProfile("github", jsonLong(obj("id")).toString, name, optionalJsonString(obj.get("email")))
+        OAuthProfile("github", login, name, optionalJsonString(obj.get("email")))
       case "google" =>
         val email = optionalJsonString(obj.get("email"))
         val name = optionalJsonString(obj.get("name")).orElse(email).getOrElse(obj("sub").str)
@@ -949,17 +1041,11 @@ object AuthService:
       case other      => Some(other.str)
     }
 
-  private def jsonLong(value: ujson.Value): Long =
-    value match
-      case ujson.Num(number) => number.toLong
-      case ujson.Str(text)   => text.toLong
-      case other             => throw RuntimeException(s"Expected numeric JSON value, got $other")
-
   private def env(names: String*): Option[String] =
     names.iterator.flatMap(sys.env.get).find(_.trim.nonEmpty)
 
   private def redirectUri(provider: String): String =
-    val base = sys.env.getOrElse("YANG_PORTAL_BASE_URL", "http://127.0.0.1:8080").stripSuffix("/")
+    val base = PortalSettings.baseUrl
     s"$base/auth/$provider/callback"
 
   private def form(params: Seq[(String, String)]): String =
@@ -968,10 +1054,6 @@ object AuthService:
   private def enc(value: String): String =
     URLEncoder.encode(value, StandardCharsets.UTF_8)
 
-  private def randomToken(): String =
-    val bytes = Array.ofDim[Byte](32)
-    SecureRandom().nextBytes(bytes)
-    Base64.getUrlEncoder.withoutPadding().encodeToString(bytes)
 
 final case class DraftClassification(number: Int, category: String, subgroup: Option[String], rationale: String)
 
@@ -1142,6 +1224,22 @@ object PortalCss:
       |button { cursor: pointer; }
       |button:disabled { cursor: default; opacity: 0.55; }
       |
+      |.admin-page { max-width: 1200px; margin: 0 auto; padding: 24px; }
+      |.table-scroll { overflow-x: auto; }
+      |.admin-page .actions { margin-bottom: 14px; }
+      |.account-info { display: grid; gap: 8px; }
+      |.account-info p.empty, .admin-page p.empty { margin: 0; padding: 6px 0; }
+      |.account-meta { color: #58616d; font-size: 13px; margin: 8px 0; }
+      |.admin-page td .empty { padding: 4px 0; }
+      |.admin-page td .pill { font-size: 12px; }
+      |.identity-badge { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+      |.identity-badge .pill { white-space: nowrap; font-weight: 600; }
+      |.identity-github { display: inline-flex; align-items: center; gap: 5px; }
+      |.github-icon { display: inline-block; width: 16px; height: 16px; flex-shrink: 0; vertical-align: middle; }
+      |.identity-local { border-style: dashed !important; }
+      |.comment { padding: 12px 0; border-top: 1px solid #d8dde4; }
+      |.login-panel hr { border: 0; border-top: 1px solid #d8dde4; margin: 20px 0; }
+      |.login-panel > .button { width: 100%; }
       |.app { min-height: 100vh; display: grid; grid-template-columns: 360px 1fr; }
       |.login-shell { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
       |.login-panel { width: min(460px, 100%); background: #fff; border: 1px solid #d8dde4; border-radius: 8px; padding: 22px; }

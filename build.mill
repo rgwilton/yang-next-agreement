@@ -6,18 +6,29 @@
 package build
 
 import mill.*, scalalib.*, scalajslib.*
+import mill.api.BuildCtx
 import uk.org.wilton.ietf.yang.mill.plugin.*
 
 object `package` extends IETF:
   def portalScalaVersion = "3.9.0"
 
   def draft = Task.Source:
-    "draft-wilton-netmod-yang-next-agreement.md"
+    "draft-ietf-netmod-yang-next-agreement.md"
+
+  def updateDraft(args: String*) = Task.Command:
+    portal.server.runMain("portal.server.DraftUpdater", args*)()
+
+  def checkDraft() = Task.Command:
+    updateDraft("--check")()
 
   object portal extends Module:
-    private def copyClientAssets(from: os.Path, to: os.Path): Unit =
+    def iconLicense = Task.Source:
+      BuildCtx.workspaceRoot / "portal" / "client" / "LICENSE.octicons"
+
+    private def copyClientAssets(from: os.Path, to: os.Path, license: os.Path): Unit =
       os.remove.all(to)
       os.makeDir.all(to)
+      os.copy.over(license, to / "LICENSE.octicons")
       for file <- Seq("main.js", "main.js.map") do
         val source = from / file
         if os.exists(source) then os.copy.over(source, to / file)
@@ -71,7 +82,7 @@ object `package` extends IETF:
       os.remove.all(packageDir)
       os.makeDir.all(binDir)
       os.makeDir.all(libDir)
-      copyClientAssets(linkedClient.dest.path, assetsDir)
+      copyClientAssets(linkedClient.dest.path, assetsDir, iconLicense().path)
       os.copy.over(assemblyJar, libDir / "yang-next-portal.jar")
       writeLauncher(binDir / "yang-next-portal", """java -jar "$APP_DIR/lib/yang-next-portal.jar"""")
       PathRef(packageDir)
@@ -97,7 +108,7 @@ object `package` extends IETF:
 
       os.remove.all(packageDir)
       os.makeDir.all(binDir)
-      copyClientAssets(linkedClient.dest.path, assetsDir)
+      copyClientAssets(linkedClient.dest.path, assetsDir, iconLicense().path)
       writeNativeReflectConfig(reflectConfig)
       os.proc(
         nativeImageCommand,
@@ -135,6 +146,9 @@ object `package` extends IETF:
         mvn"org.xerial:sqlite-jdbc:3.54.1.0",
         mvn"org.slf4j:slf4j-simple:2.0.20"
       )
+
+      object test extends ScalaTests, TestModule.Utest:
+        def utestVersion = "0.9.1"
 
   // All RFCs that we need to extract YANG from.
   def rfcDeps = List(
@@ -196,9 +210,18 @@ object `package` extends IETF:
 
 
 
-  def all = Task:
-    checkDraftLatest()
-    make()
+  def all() = Task.Command:
+    updateDraft()()
+    checkDraftLatest()()
+    // Preserve the IETF plugin's preparation steps, then invoke make here.
+    // Depending on make() as a sibling task would allow it to run before the
+    // updater: Mill schedules independent task dependencies in parallel.
+    buildAllYangTrees()
+    extractAllTreeSnippets()
+    validateYangCompiles()
+    validateAllYangInstanceData()
+    yangSources()
+    os.proc("make", "fix-lint", "all").call(cwd = BuildCtx.workspaceRoot)
     println(s"Task all Finished")
 
 

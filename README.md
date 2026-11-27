@@ -1,4 +1,4 @@
-<!-- regenerate: on (set to off if you edit this file) -->
+<!-- regenerate: off -->
 
 # YANG Next Agreement
 
@@ -28,4 +28,12 @@ $ make
 
 Command line usage requires that you have the necessary software installed.  See
 [the instructions](https://github.com/martinthomson/i-d-template/blob/main/doc/SETUP.md).
+
+## Updating the agreement from the issue portal
+
+Run `./mill updateDraft` to refresh the draft from the portal's SQLite database.
+The existing `./mill all` workflow refreshes the draft before checking and
+building it. Use `./mill checkDraft` to check whether a refresh is needed.
+See [the portal documentation](portal/README.md#updating-the-agreement-draft)
+for preview commands, database selection, and the fields that are updated.
 

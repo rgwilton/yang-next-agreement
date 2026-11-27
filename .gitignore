@@ -26,3 +26,8 @@ report.xml
 /.metals
 /.vscode
 /portal-data
+*.sqlite
+*.sqlite-*
+/.DS_Store
+.bsp
+

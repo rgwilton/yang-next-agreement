@@ -15,10 +15,21 @@ object PortalClient:
   private val issues = Var[List[IssueSummary]](Nil)
   private val authSession = Var[Option[AuthSession]](None)
   private val authProviders = Var(AuthProviders(github = false, google = false))
-  private val authMode = Var(Option(dom.window.localStorage.getItem("yangPortalAuthMode")).getOrElse(""))
+  private val localIdentifier = Var("")
+  private val localPassword = Var("")
+  private val resettingPasswordFor = Var[Option[ujson.Value]](None)
+  private val resetPassword = Var("")
+  private val creatingLocalUser = Var(false)
+  private val newLocalIdentifier = Var("")
+  private val newLocalPassword = Var("")
+  private val newLocalName = Var("")
+  private val newLocalEmail = Var("")
+  private val adminUsers = Var[List[ujson.Value]](Nil)
+  private val adminChanges = Var[List[ujson.Value]](Nil)
+  private val adminHistory = Var(false)
+  private val notice = Var("")
   private val selected = Var[Option[IssueDetail]](None)
   private val activeView = Var("summary")
-  private val contributor = Var(Option(dom.window.localStorage.getItem("yangPortalContributor")).getOrElse(""))
   private val categoryFilter = Var("")
   private val subgroupFilter = Var("")
   private val searchFilter = Var("")
@@ -28,7 +39,7 @@ object PortalClient:
   private val openSections = Var(Set("Unclassified", "Include in YANG 2.0", "Consider for YANG 2.0", "Defer beyond YANG 2.0", "Do not pursue"))
   private val openSubsections = Var(Set.empty[String])
   private val openGitHubCommentIssues = Var(Set.empty[Int])
-  private val connectedUsers = Var[List[String]](Nil)
+  private val connectedUsers = Var[List[Participant]](Nil)
   private var eventSocket: Option[dom.WebSocket] = None
   private var initialRouteApplied = false
 
@@ -36,13 +47,55 @@ object PortalClient:
     renderOnDomContentLoaded(dom.document.getElementById("app"), app)
     dom.window.onpopstate = (_: dom.PopStateEvent) => applyLocationRoute()
     loadSession()
-    connectEvents()
+    dom.window.setInterval(() => {
+      if authSession.now().nonEmpty then
+        loadSession(refreshIssues = false)
+        eventSocket.filter(_.readyState == dom.WebSocket.OPEN).foreach(_.send(ujson.Obj("type" -> "presence").render()))
+    }, 30000)
+
+  private def canGiveOpinion: Boolean = authSession.now().exists(_.role != "visitor")
+  private def canSuggest: Boolean = authSession.now().exists(user => Set("consensus", "admin").contains(user.role))
+  private def isAdmin: Boolean = authSession.now().exists(_.role == "admin")
+  private def ownsVote(vote: Vote): Boolean = vote.userId.exists(id => authSession.now().exists(_.id == id))
+  private def participantKey(vote: Vote): String = vote.userId.getOrElse("legacy:" + vote.contributor)
+  private val roleNames = List("visitor" -> "Visitor", "opinion" -> "Opinion contributor", "consensus" -> "Consensus proposer", "admin" -> "Administrator")
+  private def roleLabel(key: String): String = roleNames.find(_._1 == key).map(_._2).getOrElse(key)
+
+  private def identityText(identity: Identity): String =
+    val provider = identity.provider match
+      case "github" => "GitHub"
+      case "local" => "Local"
+      case other => other.capitalize
+    val identifier = if identity.provider == "github" then "@" + identity.identifier else identity.identifier
+    s"$provider · $identifier"
+
+  // GitHub mark from primer/octicons, under the MIT license in portal/client/LICENSE.octicons.
+  private def githubIcon: SvgElement =
+    svg.svg(
+      svg.cls := "github-icon", svg.viewBox := "0 0 16 16", svg.width := "16", svg.height := "16",
+      svg.fill := "currentColor", svg.titleTag("GitHub"),
+      svg.path(svg.d := "M6.766 11.328c-2.063-.25-3.516-1.734-3.516-3.656 0-.781.281-1.625.75-2.188-.203-.515-.172-1.609.063-2.062.625-.078 1.468.25 1.968.703.594-.187 1.219-.281 1.985-.281.765 0 1.39.094 1.953.265.484-.437 1.344-.765 1.969-.687.218.422.25 1.515.046 2.047.5.593.766 1.39.766 2.203 0 1.922-1.453 3.375-3.547 3.64.531.344.89 1.094.89 1.954v1.625c0 .468.391.734.86.547C13.781 14.359 16 11.53 16 8.03 16 3.61 12.406 0 7.984 0 3.563 0 0 3.61 0 8.031a7.88 7.88 0 0 0 5.172 7.422c.422.156.828-.125.828-.547v-1.25c-.219.094-.5.156-.75.156-1.031 0-1.64-.562-2.078-1.609-.172-.422-.36-.672-.719-.719-.187-.015-.25-.093-.25-.187 0-.188.313-.328.625-.328.453 0 .844.281 1.25.86.313.452.64.655 1.031.655s.641-.14 1-.5c.266-.265.47-.5.657-.656")
+    )
+
+  private def identityBadge(name: String, identity: Option[Identity]): HtmlElement =
+    span(cls := "identity-badge", if name.isEmpty then emptyNode else span(name),
+      identity match
+        case Some(user) if user.provider == "github" =>
+          span(cls := "pill identity-github", title := "GitHub account", githubIcon,
+            if user.identifier.isEmpty then emptyNode else span("@" + user.identifier))
+        case Some(user) => span(cls := "pill", cls.toggle("identity-local") := (user.provider == "local"), identityText(user))
+        case None => emptyNode
+    )
+
+  private def readIdentity(value: ujson.Value): Option[Identity] =
+    value.obj.get("identity").filter(_ != ujson.Null).map(identity => Identity(identity("provider").str, identity("identifier").str))
 
   private def app: HtmlElement =
     div(
-      child <-- authSession.signal.combineWith(authMode.signal).map {
-        case (None, mode) if mode != "local" => loginView
-        case _                               => portalView
+      child <-- authSession.signal.combineWith(activeView.signal.map(_ == "admin").distinct).map {
+        case (None, _) => loginView
+        case (Some(user), true) if user.role == "admin" => adminView
+        case _ => portalView
       }
     )
 
@@ -72,118 +125,229 @@ object PortalClient:
     )
 
   private def loginView: HtmlElement =
-    div(
-      cls := "login-shell",
-      div(
-        cls := "login-panel",
+    div(cls := "login-shell",
+      div(cls := "login-panel",
         h1(cls := "title", "YANG 2.0 Issues"),
-        p(cls := "subtitle", "Choose how to identify yourself before voting or commenting."),
-        child <-- error.signal.map {
-          case ""      => emptyNode
-          case message => div(cls := "error", message)
-        },
-        div(
-          cls := "login-actions",
-          button(
-            cls := "button",
-            disabled <-- authProviders.signal.map(!_.github),
-            onClick --> (_ => startOAuth("github")),
-            "GitHub"
-          ),
-          button(cls := "button secondary", onClick --> (_ => chooseLocal()), "Local")
+        p(cls := "subtitle", "Sign in with GitHub or an existing local account."),
+        child <-- error.signal.map(message => if message.isEmpty then emptyNode else div(cls := "error", message)),
+        button(cls := "button", disabled <-- authProviders.signal.combineWith(loading.signal).map((providers, busy) => !providers.github || busy),
+          onClick --> (_ => startOAuth("github")), "Sign in with GitHub"),
+        hr(),
+        form(cls := "toolbar",
+          onSubmit.preventDefault --> (_ => authenticateLocal()),
+          h2("Local account"),
+          div(cls := "field", label(forId := "local-identifier", "Identifier"),
+            input(idAttr := "local-identifier", cls := "input", required := true, maxLength := 64,
+              placeholder := "Your local identifier", autoComplete := "username",
+              value <-- localIdentifier.signal, onInput.mapToValue --> localIdentifier.writer)),
+          div(cls := "field", label(forId := "local-password", "Password"),
+            input(idAttr := "local-password", cls := "input", typ := "password", required := true, maxLength := 128,
+              autoComplete := "current-password", value <-- localPassword.signal, onInput.mapToValue --> localPassword.writer)),
+          button(cls := "button", typ := "submit", disabled <-- loading.signal, "Sign in"),
+          p(cls := "account-meta", "Contact an administrator if you need a local account.")
         )
       )
     )
 
   private def controls: HtmlElement =
-    div(
-      cls := "toolbar",
-      div(
-        cls := "field",
-        label("Contributor"),
-        input(
-          cls := "input",
-          placeholder := "Display name",
-          disabled <-- authSession.signal.map(_.nonEmpty),
-          value <-- contributor.signal,
-          onInput.mapToValue --> { value =>
-            contributor.set(value)
-            dom.window.localStorage.setItem("yangPortalContributor", value)
-            identifyEventSocket()
-          }
-        )
-      ),
+    div(cls := "toolbar",
       child <-- authSession.signal.map {
-        case Some(session) =>
-          div(
-            cls := "identity-row",
-            span(cls := "pill", s"Signed in with ${session.provider}: ${session.displayName}"),
-            button(cls := "button primary compact", disabled <-- loading.signal, onClick --> (_ => logout()), "Log out")
-          )
-        case None =>
-          div(
-            cls := "identity-row",
-            span(
-              cls := "pill",
-              "Local mode",
-              child <-- contributor.signal.map { name =>
-                val trimmed = name.trim
-                if trimmed.isEmpty then emptyNode else span(cls := "local-contributor-name", s": $trimmed")
-              }
-            ),
-            button(cls := "button primary compact", disabled <-- loading.signal, onClick --> (_ => logout()), "Log out")
-          )
+        case Some(session) => div(cls := "account-info",
+          div(cls := "identity-row", identityBadge(session.displayName, Some(Identity(session.provider, session.identifier))),
+            span(cls := "pill", roleLabel(session.role))),
+          if session.role == "visitor" then p(cls := "empty", "You have view-only access. An administrator can enable participation.") else emptyNode,
+          button(cls := "button primary compact", disabled <-- loading.signal, onClick --> (_ => logout()), "Log out")
+        )
+        case None => emptyNode
       },
-      div(
-        cls := "actions",
+      div(cls := "actions",
         button(cls := "button secondary", onClick --> (_ => showSummary()), "Summary"),
-        button(cls := "button", disabled <-- loading.signal, onClick --> (_ => syncGithub()), "Sync GitHub")
+        if isAdmin then button(cls := "button", disabled <-- loading.signal, onClick --> (_ => syncGithub()), "Sync GitHub") else emptyNode,
+        if isAdmin then button(cls := "button secondary", onClick --> (_ => showAdmin()), "User access") else emptyNode
       ),
-      div(
-        cls := "field",
-        label("Search"),
-        input(
-          cls := "input",
-          placeholder := "Issue number or title",
-          value <-- searchFilter.signal,
-          onInput.mapToValue --> searchFilter.writer
-        )
-      ),
-      div(
-        cls := "field",
-        label("Category"),
-        select(
-          cls := "select",
-          value <-- categoryFilter.signal,
-          onChange.mapToValue --> categoryFilter.writer,
-          option(value := "", "All categories"),
-          children <-- categories.signal.map(_.map(cat => option(value := cat, cat)))
-        )
-      ),
-      div(
-        cls := "field",
-        label("Subgroup"),
-        select(
-          cls := "select",
-          value <-- subgroupFilter.signal,
-          onChange.mapToValue --> subgroupFilter.writer,
-          option(value := "", "All subgroups"),
-          option(value := "__none__", "No subgroup"),
-          children <-- subgroups.signal.map(_.map(group => option(value := group, group)))
-        )
-      ),
-      div(
-        cls := "checkbox-row",
-        label(
-          input(
-            typ := "checkbox",
-            checked <-- hideClosedIssues.signal,
-            onChange.mapToChecked --> hideClosedIssues.writer
-          ),
-          span("Hide closed issues")
-        )
-      )
+      div(cls := "field", label("Search"), input(cls := "input", placeholder := "Issue number or title",
+        value <-- searchFilter.signal, onInput.mapToValue --> searchFilter.writer)),
+      div(cls := "field", label("Category"), select(cls := "select", value <-- categoryFilter.signal,
+        onChange.mapToValue --> categoryFilter.writer, option(value := "", "All categories"),
+        children <-- categories.signal.map(_.map(cat => option(value := cat, cat))))),
+      div(cls := "field", label("Subgroup"), select(cls := "select", value <-- subgroupFilter.signal,
+        onChange.mapToValue --> subgroupFilter.writer, option(value := "", "All subgroups"),
+        option(value := "__none__", "No subgroup"),
+        children <-- subgroups.signal.map(_.map(group => option(value := group, group))))),
+      div(cls := "checkbox-row", label(input(typ := "checkbox", checked <-- hideClosedIssues.signal,
+        onChange.mapToChecked --> hideClosedIssues.writer), span("Hide closed issues")))
     )
+
+  private def adminView: HtmlElement =
+    mainTag(cls := "admin-page",
+      div(cls := "section",
+        div(cls := "actions", button(cls := "button secondary", onClick --> (_ => showSummary()), "Back to issues"), span(cls := "pill", "Administrator")),
+        h1("User access"), p(cls := "subtitle", "Manage who can participate and suggest consensus. New accounts start as Visitors."),
+        child <-- error.signal.map(message => if message.isEmpty then emptyNode else div(cls := "error", message)),
+        div(role := "status", aria.live := "polite", child.text <-- notice.signal),
+        p(cls := "account-meta", "Visitor: view only · Opinion contributor: opinions and comments · Consensus proposer: classifications · Administrator: user access and sync"),
+        div(cls := "actions",
+          button(cls := "button secondary", onClick --> (_ => adminHistory.set(false)), "Users"),
+          button(cls := "button secondary", onClick --> (_ => adminHistory.set(true)), "Change history"),
+          button(cls := "button", onClick --> (_ => { error.set(""); notice.set(""); clearPasswordReset(); creatingLocalUser.set(true) }), "Add local user")),
+        child <-- creatingLocalUser.signal.map(open => if open then createLocalUserForm else emptyNode),
+        child <-- resettingPasswordFor.signal.map(_.map(passwordResetForm).getOrElse(emptyNode)),
+        child <-- adminHistory.signal.map { history =>
+          if history then
+            div(cls := "table-scroll",
+              table(cls := "table", thead(tr(th("User"), th("Change"), th("Changed by"), th("Time"))),
+                tbody(children <-- adminChanges.signal.map(_.map { change =>
+                  tr(td(identityBadge(change("displayName").str, readIdentity(change))),
+                    td(s"${roleLabel(change("oldRole").str)} → ${roleLabel(change("newRole").str)}"),
+                    td(if change("actorIdentity") == ujson.Null then span(change("actor").str)
+                      else identityBadge(change("actor").str, Some(Identity(change("actorIdentity")("provider").str, change("actorIdentity")("identifier").str)))),
+                    td(formatUtc(change("changedAt").str)))
+                }))))
+          else
+            div(cls := "table-scroll",
+              table(cls := "table", thead(tr(th("User / identity"), th("Access level"), th("Last sign-in"), th(""))),
+                tbody(children <-- adminUsers.signal.map(_.map(adminUserRow)))))
+        },
+        p(cls := "empty", "Changes take effect on the next request. At least one administrator must remain."))
+    )
+
+  private def clearNewLocalUser(): Unit =
+    newLocalIdentifier.set("")
+    newLocalPassword.set("")
+    newLocalName.set("")
+    newLocalEmail.set("")
+    creatingLocalUser.set(false)
+
+  private def createLocalUserForm: HtmlElement =
+    form(cls := "toolbar", onSubmit.preventDefault --> (_ => createLocalUser()),
+      h2("Add local user"),
+      p(cls := "account-meta", "The new account starts as a Visitor. Set an initial password and share it with the user privately."),
+      div(cls := "grid",
+        div(cls := "field", label(forId := "new-local-identifier", "Local identifier"),
+          input(idAttr := "new-local-identifier", cls := "input", required := true, maxLength := 64, autoComplete := "off",
+            value <-- newLocalIdentifier.signal, onInput.mapToValue --> newLocalIdentifier.writer)),
+        div(cls := "field", label(forId := "new-local-password", "Initial password"),
+          input(idAttr := "new-local-password", cls := "input", typ := "password", required := true, minLength := 6, maxLength := 128,
+            autoComplete := "new-password", value <-- newLocalPassword.signal, onInput.mapToValue --> newLocalPassword.writer)),
+        div(cls := "field", label(forId := "new-local-name", "Name (optional)"),
+          input(idAttr := "new-local-name", cls := "input", maxLength := 120, autoComplete := "off",
+            value <-- newLocalName.signal, onInput.mapToValue --> newLocalName.writer)),
+        div(cls := "field", label(forId := "new-local-email", "Email address (optional)"),
+          input(idAttr := "new-local-email", cls := "input", typ := "email", maxLength := 254, autoComplete := "off",
+            value <-- newLocalEmail.signal, onInput.mapToValue --> newLocalEmail.writer))
+      ),
+      p(cls := "account-meta", "Identifiers use 3–64 letters, numbers, dots, underscores or hyphens and are case-insensitive. Passwords use 6–128 characters. The identifier is shown when no name is supplied; email stays private."),
+      div(cls := "actions",
+        button(cls := "button", typ := "submit", disabled <-- loading.signal, "Create local user"),
+        button(cls := "button secondary", typ := "button", disabled <-- loading.signal, onClick --> (_ => clearNewLocalUser()), "Cancel"))
+    )
+
+  private def createLocalUser(): Unit =
+    error.set("")
+    notice.set("")
+    loading.set(true)
+    val response = Http.post("/api/admin/users/local", ujson.Obj(
+      "identifier" -> newLocalIdentifier.now(), "password" -> newLocalPassword.now(),
+      "name" -> newLocalName.now(), "email" -> newLocalEmail.now()))
+    response.foreach { _ =>
+      clearNewLocalUser()
+      adminHistory.set(false)
+      notice.set("Local user created with Visitor access.")
+      loadAdminUsers()
+    }
+    response.failed.foreach(showError)
+
+  private def clearPasswordReset(): Unit =
+    resettingPasswordFor.set(None)
+    resetPassword.set("")
+
+  private def passwordResetForm(user: ujson.Value): HtmlElement =
+    form(cls := "toolbar", onSubmit.preventDefault --> (_ => savePasswordReset(user)),
+      h2("Reset local password"),
+      p(identityBadge(user("displayName").str, Some(Identity("local", user("identifier").str)))),
+      p(cls := "account-meta", "Set a new password of 6–128 characters. Existing sessions for this user will be signed out."),
+      div(cls := "field", label(forId := "reset-local-password", "New password"),
+        input(idAttr := "reset-local-password", cls := "input", typ := "password", required := true,
+          minLength := 6, maxLength := 128, autoComplete := "new-password",
+          value <-- resetPassword.signal, onInput.mapToValue --> resetPassword.writer)),
+      div(cls := "actions",
+        button(cls := "button", typ := "submit", disabled <-- loading.signal, "Set new password"),
+        button(cls := "button secondary", typ := "button", disabled <-- loading.signal, onClick --> (_ => clearPasswordReset()), "Cancel"))
+    )
+
+  private def savePasswordReset(user: ujson.Value): Unit =
+    error.set("")
+    notice.set("")
+    loading.set(true)
+    val userId = user("id").str
+    val response = Http.post(s"/api/admin/users/$userId/password", ujson.Obj("password" -> resetPassword.now()))
+    response.foreach { _ =>
+      clearPasswordReset()
+      loading.set(false)
+      if authSession.now().exists(_.id == userId) then loadSession()
+      else notice.set(s"Password reset for ${user("identifier").str}. Existing sessions have been signed out.")
+    }
+    response.failed.foreach(showError)
+
+  private def adminUserRow(user: ujson.Value): HtmlElement =
+    val currentRole = user("role").str
+    val nextRole = Var(currentRole)
+    val id = user("id").str
+    tr(
+      td(strong(user("displayName").str), if authSession.now().exists(_.id == id) then span(cls := "pill", "You") else emptyNode,
+        div(identityBadge("", Some(Identity(user("provider").str, user("identifier").str)))),
+        optString(user("email")).map(email => div(cls := "empty", email)).getOrElse(emptyNode)),
+      td(select(cls := "select", aria.label := s"Access level for ${user("displayName").str}",
+        value <-- nextRole.signal, onChange.mapToValue --> nextRole.writer,
+        roleNames.map { (key, label) => option(value := key, com.raquo.laminar.api.L.selected := (key == currentRole), label) })),
+      td(if user("lastLoginAt").str.isEmpty then "Never" else formatUtc(user("lastLoginAt").str)),
+      td(button(cls := "button compact", disabled <-- nextRole.signal.combineWith(loading.signal).map((next, busy) => next == currentRole || busy),
+        onClick --> (_ => saveRole(id, nextRole.now())), "Save"),
+        if user("provider").str == "local" then button(cls := "button secondary compact",
+          aria.label := s"Reset password for ${user("identifier").str}", disabled <-- loading.signal,
+          onClick --> { _ =>
+            clearNewLocalUser()
+            clearPasswordReset()
+            error.set("")
+            notice.set("")
+            resettingPasswordFor.set(Some(user))
+          }, "Reset password") else emptyNode)
+    )
+
+  private def showAdmin(updateHistory: Boolean = true): Unit =
+    if isAdmin then
+      error.set("")
+      notice.set("")
+      activeView.set("admin")
+      if updateHistory then setPath("/admin/users")
+      loadAdminUsers()
+    else
+      error.set("Administrator access is required.")
+      showSummary()
+
+  private def loadAdminUsers(): Unit =
+    val requestingUser = authSession.now().map(_.id)
+    loading.set(true)
+    val response = Http.get("/api/admin/users")
+    response.foreach(text => parseResponse {
+      val json = ujson.read(text)
+      if isAdmin && authSession.now().map(_.id) == requestingUser then
+        adminUsers.set(json("users").arr.toList)
+        adminChanges.set(json("changes").arr.toList)
+    })
+    response.failed.foreach(showError)
+
+  private def saveRole(id: String, next: String): Unit =
+    notice.set("")
+    error.set("")
+    loading.set(true)
+    val response = Http.post(s"/api/admin/users/$id/role", ujson.Obj("role" -> next))
+    response.foreach { _ =>
+      notice.set("Access level saved.")
+      loadSession()
+      if !authSession.now().exists(user => user.id == id && next != "admin") then loadAdminUsers()
+    }
+    response.failed.foreach(showError)
 
   private def issueList: HtmlElement =
     div(
@@ -324,9 +488,9 @@ object PortalClient:
     val subgroupVar = Var(detail.classification.flatMap(_.subgroup).getOrElse(""))
     val rationaleVar = Var(detail.classification.map(_.rationale).getOrElse(""))
     val commentVar = Var("")
-    val currentContributorVote = detail.votes.find(_.contributor == contributor.now().trim).map(_.vote)
+    val currentContributorVote = detail.votes.find(ownsVote).map(_.vote)
     val voteChoiceVar = Var(currentContributorVote.getOrElse("Not evaluated"))
-    val voteCommentVar = Var(detail.votes.find(_.contributor == contributor.now().trim).flatMap(_.comment).getOrElse(""))
+    val voteCommentVar = Var(detail.votes.find(ownsVote).flatMap(_.comment).getOrElse(""))
     val githubDescriptionOpen = Var(false)
     val githubCommentsOpen = Var(openGitHubCommentIssues.now().contains(detail.issue.number))
     val voteSummaryOpen = Var(true)
@@ -371,7 +535,7 @@ object PortalClient:
             val opening = !githubCommentsOpen.now()
             githubCommentsOpen.set(opening)
             openGitHubCommentIssues.update(current => if opening then current + detail.issue.number else current - detail.issue.number)
-            if opening then syncGitHubComments(detail.issue.number)
+            if opening && isAdmin then syncGitHubComments(detail.issue.number)
           },
           span(cls := "collapse-icon", child <-- githubCommentsOpen.signal.map(chevronIcon)),
           span(s"GitHub comments (${detail.githubComments.size})")
@@ -381,7 +545,7 @@ object PortalClient:
           else
             div(
               cls := "collapse-body",
-              div(cls := "actions", button(cls := "button secondary", onClick --> (_ => syncGitHubComments(detail.issue.number)), "Refresh GitHub comments")),
+              if isAdmin then div(cls := "actions", button(cls := "button secondary", onClick --> (_ => syncGitHubComments(detail.issue.number)), "Refresh GitHub comments")) else emptyNode,
               if detail.githubComments.isEmpty then div(cls := "empty", "No GitHub comments are cached for this issue.")
               else div(detail.githubComments.map(githubCommentView))
             )
@@ -390,94 +554,114 @@ object PortalClient:
       sectionTag(
         cls := "section",
         h2("Classification"),
-        div(
-          cls := "grid",
+        detail.classification.map(item => p(cls := "account-meta", "Proposed by ", identityBadge(item.contributor, item.identity))).getOrElse(emptyNode),
+        if canSuggest then div(
           div(
-            cls := "field",
-            label("Category"),
-            select(
-              cls := "select",
-              value <-- categoryVar.signal.combineWith(categories.signal).map { case (current, _) => current },
-              onChange.mapToValue --> categoryVar.writer,
-              children <-- categories.signal.combineWith(categoryVar.signal).map { case (availableCategories, current) =>
-                availableCategories.map(cat =>
-                  option(value := cat, com.raquo.laminar.api.L.selected := (cat == current), cat)
-                )
-              }
+            cls := "grid",
+            div(
+              cls := "field",
+              label("Category"),
+              select(
+                cls := "select",
+                value <-- categoryVar.signal.combineWith(categories.signal).map { case (current, _) => current },
+                onChange.mapToValue --> categoryVar.writer,
+                children <-- categories.signal.combineWith(categoryVar.signal).map { case (availableCategories, current) =>
+                  availableCategories.map(cat =>
+                    option(value := cat, com.raquo.laminar.api.L.selected := (cat == current), cat)
+                  )
+                }
+              )
+            ),
+            div(
+              cls := "field",
+              label("Subgroup"),
+              select(
+                cls := "select",
+                value <-- subgroupVar.signal.combineWith(subgroups.signal).map { case (current, _) => current },
+                onChange.mapToValue --> subgroupVar.writer,
+                children <-- subgroups.signal.combineWith(subgroupVar.signal).map { case (availableSubgroups, current) =>
+                  option(value := "", com.raquo.laminar.api.L.selected := current.isEmpty, "No subgroup") +:
+                    availableSubgroups.map(group =>
+                      option(value := group, com.raquo.laminar.api.L.selected := (group == current), group)
+                    )
+                }
+              )
             )
           ),
           div(
             cls := "field",
-            label("Subgroup"),
-            select(
-              cls := "select",
-              value <-- subgroupVar.signal.combineWith(subgroups.signal).map { case (current, _) => current },
-              onChange.mapToValue --> subgroupVar.writer,
-              children <-- subgroups.signal.combineWith(subgroupVar.signal).map { case (availableSubgroups, current) =>
-                option(value := "", com.raquo.laminar.api.L.selected := current.isEmpty, "No subgroup") +:
-                  availableSubgroups.map(group =>
-                    option(value := group, com.raquo.laminar.api.L.selected := (group == current), group)
-                  )
-              }
+            label("Rationale"),
+            textArea(
+              cls := "textarea",
+              value <-- rationaleVar.signal,
+              onInput.mapToValue --> rationaleVar.writer
+            )
+          ),
+          div(
+            cls := "actions preset-actions",
+            button(cls := "button secondary compact", onClick --> (_ => appendRationale(rationaleVar, "Consensus reached.")), "Consensus"),
+            button(cls := "button secondary compact", onClick --> (_ => appendRationale(rationaleVar, "Rough consensus reached.")), "Rough consensus"),
+            button(cls := "button secondary compact", onClick --> (_ => appendRationale(rationaleVar, "No consensus reached.")), "No consensus")
+          ),
+          div(
+            cls := "actions",
+            button(
+              cls := "button",
+              onClick --> (_ => saveClassification(detail.issue.number, categoryVar.now(), subgroupVar.now(), rationaleVar.now())),
+              detail.classification.fold("Classify issue")(_ => "Update Classification")
             )
           )
-        ),
-        div(
-          cls := "field",
-          label("Rationale"),
-          textArea(
-            cls := "textarea",
-            value <-- rationaleVar.signal,
-            onInput.mapToValue --> rationaleVar.writer
-          )
-        ),
-        div(
-          cls := "actions preset-actions",
-          button(cls := "button secondary compact", onClick --> (_ => appendRationale(rationaleVar, "Consensus reached.")), "Consensus"),
-          button(cls := "button secondary compact", onClick --> (_ => appendRationale(rationaleVar, "Rough consensus reached.")), "Rough consensus"),
-          button(cls := "button secondary compact", onClick --> (_ => appendRationale(rationaleVar, "No consensus reached.")), "No consensus")
-        ),
-        div(
-          cls := "actions",
-          button(
-            cls := "button",
-            onClick --> (_ => saveClassification(detail.issue.number, categoryVar.now(), subgroupVar.now(), rationaleVar.now())),
-            detail.classification.fold("Classify issue")(_ => "Update Classification")
-          )
+        ) else div(
+          p(strong("Category: "), detail.classification.map(_.category).getOrElse("Unclassified")),
+          p(strong("Subgroup: "), detail.classification.flatMap(_.subgroup).getOrElse("No subgroup")),
+          p(strong("Rationale: "), detail.classification.map(_.rationale).filter(_.nonEmpty).getOrElse("No rationale recorded."))
         )
       ),
       sectionTag(
         cls := "section",
         h2("Opinion on Current Classification"),
-        div(
-          cls := "vote-grid",
-          voteOptions.now().map(option =>
-            button(
-              cls := s"vote-button ${voteClass(option)}",
-              cls.toggle("selected") <-- voteChoiceVar.signal.map(_ == option),
-              onClick --> { _ =>
-                voteChoiceVar.set(option)
-                saveVote(detail.issue.number, option, voteCommentVar.now())
-              },
-              option
+        if canGiveOpinion then div(
+          div(
+            cls := "vote-grid",
+            voteOptions.now().map(option =>
+              button(
+                cls := s"vote-button ${voteClass(option)}",
+                cls.toggle("selected") <-- voteChoiceVar.signal.map(_ == option),
+                onClick --> { _ =>
+                  voteChoiceVar.set(option)
+                  saveVote(detail.issue.number, option, voteCommentVar.now())
+                },
+                option
+              )
             )
-          )
-        ),
-        div(
-          cls := "field",
-          label("Opinion comment"),
-          textArea(
-            cls := "textarea",
-            value <-- voteCommentVar.signal,
-            onInput.mapToValue --> voteCommentVar.writer,
-            onKeyDown.filter(event => event.key == "Enter" && !event.shiftKey).preventDefault --> { _ =>
-              saveCurrentVote(detail.issue.number, voteChoiceVar.now(), voteCommentVar.now())
-            }
-          )
-        ),
-        consensusPanel(detail.votes),
-        collapsibleDetailPanel("Opinion summary", voteSummaryOpen, voteSummaryTable(detail.voteSummary, detail.votes)),
+          ),
+          div(
+            cls := "field",
+            label("Opinion comment"),
+            textArea(
+              cls := "textarea",
+              value <-- voteCommentVar.signal,
+              onInput.mapToValue --> voteCommentVar.writer,
+              onKeyDown.filter(event => event.key == "Enter" && !event.shiftKey).preventDefault --> { _ =>
+                saveCurrentVote(detail.issue.number, voteChoiceVar.now(), voteCommentVar.now())
+              }
+            )
+          ),
+        ) else p(cls := "empty", "You have view-only access. An administrator can enable opinions and comments."),
+        child <-- connectedUsers.signal.map(_ => consensusPanel(detail.votes)),
+        collapsibleDetailPanel("Opinion summary", voteSummaryOpen,
+          div(child <-- connectedUsers.signal.map(_ => voteSummaryTable(detail.voteSummary, detail.votes)))),
         collapsibleDetailPanel("Opinions by contributor", votesByContributorOpen, votesTable(detail.votes))
+      ),
+      sectionTag(cls := "section", h2("Discussion"),
+        if canGiveOpinion then div(cls := "toolbar",
+          textArea(cls := "textarea", aria.label := "Discussion comment", placeholder := "Add a discussion comment",
+            value <-- commentVar.signal, onInput.mapToValue --> commentVar.writer),
+          button(cls := "button", disabled <-- loading.signal, onClick --> (_ => saveComment(detail.issue.number, commentVar)), "Add comment")) else emptyNode,
+        if detail.comments.isEmpty then p(cls := "empty", "No discussion comments yet.")
+        else div(detail.comments.map(comment => div(cls := "comment",
+          p(identityBadge(comment.contributor, comment.identity), span(cls := "empty", " · " + formatUtc(comment.createdAt))),
+          pre(cls := "github-description", comment.body))))
       ),
       sectionTag(
         cls := "section",
@@ -500,13 +684,13 @@ object PortalClient:
     )
 
   private def consensusPanel(votes: List[Vote]): HtmlElement =
-    val participants = (votes.map(_.contributor) ++ connectedUsers.now()).distinct.sortBy(_.toLowerCase)
-    val total = math.max(participants.size, 1)
+    val participants = (votes.map(participantKey) ++ connectedUsers.now().map(_.id)).distinct
+    val total = participants.size
     val scoredVotes = votes.flatMap(vote => consensusScore(vote.vote))
     val score = if scoredVotes.isEmpty then 0.0 else scoredVotes.sum.toDouble / scoredVotes.size.toDouble
-    val consensusShare = scoredVotes.size.toDouble / total.toDouble
+    val consensusShare = if total == 0 then 0.0 else scoredVotes.size.toDouble / total.toDouble
     val unclearCount = votes.count(_.vote == "Problem statement is unclear")
-    val unclearShare = unclearCount.toDouble / total.toDouble
+    val unclearShare = if total == 0 then 0.0 else unclearCount.toDouble / total.toDouble
     div(
       cls := "consensus-panel",
       div(
@@ -567,14 +751,13 @@ object PortalClient:
     math.round(from + ((to - from) * math.max(0.0, math.min(1.0, amount)))).toInt
 
   private def voteSummaryTable(rows: List[VoteCount], votes: List[Vote]): HtmlElement =
-    val explicitVoters = votes.map(_.contributor).toSet
-    val implicitNotEvaluated = connectedUsers.now().filterNot(explicitVoters.contains)
+    val explicitVoters = votes.flatMap(_.userId).toSet
+    val implicitNotEvaluated = connectedUsers.now().filterNot(user => explicitVoters.contains(user.id))
     val contributorsByVote =
-      (votes.map(vote => vote.vote -> vote.contributor) ++ implicitNotEvaluated.map("Not evaluated" -> _))
+      (votes.map(vote => vote.vote -> (vote.contributor, vote.identity)) ++
+        implicitNotEvaluated.map(user => "Not evaluated" -> (user.displayName, Some(user.identity))))
         .groupMap(_._1)(_._2)
-        .view
-        .mapValues(_.distinct.sortBy(_.toLowerCase))
-        .toMap
+        .view.mapValues(_.sortBy(_._1.toLowerCase)).toMap
     val countsByVote = rows.map(row => row.vote -> row.count).toMap.updated("Not evaluated", rows.find(_.vote == "Not evaluated").map(_.count).getOrElse(0) + implicitNotEvaluated.size)
     table(
       cls := "table vote-summary-table",
@@ -585,7 +768,7 @@ object PortalClient:
           cls := s"vote-summary-row ${voteClass(row.vote)}",
           td(displayVote(row.vote)),
           td(countsByVote.getOrElse(row.vote, row.count).toString),
-          td(if contributors.isEmpty then "" else contributors.mkString(", "))
+          td(contributors.map { (name, identity) => div(identityBadge(name, identity)) })
         )
       })
     )
@@ -596,20 +779,20 @@ object PortalClient:
       table(
         cls := "table votes-table",
         thead(tr(th("Contributor"), th("Opinion"), th("Updated"), th("Comment"))),
-        tbody(rows.sortBy(_.contributor.toLowerCase).map(row => tr(td(row.contributor), td(displayVote(row.vote)), td(formatUtc(row.updatedAt)), td(row.comment.getOrElse("")))))
+        tbody(rows.sortBy(_.contributor.toLowerCase).map(row => tr(td(identityBadge(row.contributor, row.identity)), td(displayVote(row.vote)), td(formatUtc(row.updatedAt)), td(row.comment.getOrElse("")))))
       )
 
   private def commentView(comment: Comment): HtmlElement =
     div(
       cls := "comment",
-      div(cls := "meta", strong(comment.contributor), span(comment.createdAt)),
+      div(cls := "meta", identityBadge(comment.contributor, comment.identity), span(comment.createdAt)),
       div(comment.body)
     )
 
   private def githubCommentView(comment: GitHubComment): HtmlElement =
     div(
       cls := "comment",
-      div(cls := "meta", strong(comment.author), span(comment.createdAt), a(href := comment.url, target := "_blank", rel := "noreferrer", "GitHub")),
+      div(cls := "meta", identityBadge(comment.author, Some(Identity("github", comment.author))), span(comment.createdAt), a(href := comment.url, target := "_blank", rel := "noreferrer", "GitHub")),
       pre(cls := "github-description", comment.body)
     )
 
@@ -620,7 +803,7 @@ object PortalClient:
       tbody(rows.map { row =>
         tr(
           td(formatUtc(row.createdAt)),
-          td(row.contributor),
+          td(identityBadge(row.contributor, row.identity)),
           td(row.subgroup.fold(row.category)(s => s"${row.category} / $s")),
           td(row.rationale),
           td(voteSummaryText(summarizeVotes(row.votes)))
@@ -628,8 +811,8 @@ object PortalClient:
       })
     )
 
-  private def loadSession(): Unit =
-    loading.set(true)
+  private def loadSession(refreshIssues: Boolean = true): Unit =
+    if refreshIssues then loading.set(true)
     urlError().foreach(error.set)
     val response = Http.get("/api/session")
     response.foreach { text =>
@@ -637,22 +820,34 @@ object PortalClient:
         val json = ujson.read(text)
         authProviders.set(readAuthProviders(json("providers")))
         val session = readOptionalAuthSession(json("session"))
-        authSession.set(session)
+        if authSession.now() != session then authSession.set(session)
+        if session.isEmpty then
+          eventSocket.foreach(_.close())
+          eventSocket = None
+          connectedUsers.set(Nil)
+        if activeView.now() == "admin" && !session.exists(_.role == "admin") then
+          adminUsers.set(Nil)
+          adminChanges.set(Nil)
+          clearNewLocalUser()
+          clearPasswordReset()
+          showSummary()
         session.foreach { user =>
-          contributor.set(user.displayName)
-          dom.window.localStorage.setItem("yangPortalContributor", user.displayName)
-          identifyEventSocket()
+          if eventSocket.isEmpty then connectEvents()
         }
-        if session.nonEmpty || authMode.now() == "local" then loadIssues()
+        if session.nonEmpty && refreshIssues then loadIssues()
       }
     }
     response.failed.foreach(showError)
 
-  private def chooseLocal(): Unit =
-    authMode.set("local")
-    dom.window.localStorage.setItem("yangPortalAuthMode", "local")
-    identifyEventSocket()
-    loadIssues()
+  private def authenticateLocal(): Unit =
+    loading.set(true)
+    val response = Http.post("/api/auth/local/login", ujson.Obj("identifier" -> localIdentifier.now(), "password" -> localPassword.now()))
+    response.foreach { _ =>
+      localPassword.set("")
+      error.set("")
+      loadSession()
+    }
+    response.failed.foreach(showError)
 
   private def startOAuth(provider: String): Unit =
     dom.window.location.href = s"/auth/$provider/start"
@@ -660,8 +855,14 @@ object PortalClient:
   private def logout(): Unit =
     def reset(): Unit =
       authSession.set(None)
-      authMode.set("")
-      dom.window.localStorage.removeItem("yangPortalAuthMode")
+      localPassword.set("")
+      clearNewLocalUser()
+      clearPasswordReset()
+      adminUsers.set(Nil)
+      adminChanges.set(Nil)
+      connectedUsers.set(Nil)
+      eventSocket.foreach(_.close())
+      eventSocket = None
       issues.set(Nil)
       selected.set(None)
       activeView.set("summary")
@@ -702,7 +903,7 @@ object PortalClient:
         selected.set(Some(readIssueDetail(ujson.read(text))))
         activeView.set("detail")
         error.set("")
-        if syncComments then syncGitHubComments(number, showLoading = false, reportErrors = false)
+        if syncComments && isAdmin then syncGitHubComments(number, showLoading = false, reportErrors = false)
       }
     }
     response.failed.foreach(showError)
@@ -721,9 +922,8 @@ object PortalClient:
     response.foreach { text =>
       parseResponse {
         val updated = readIssueDetail(ujson.read(text))
-        if selected.now().exists(_.issue.number == number) then
+        if activeView.now() == "detail" && selected.now().exists(_.issue.number == number) then
           selected.set(Some(updated))
-          activeView.set("detail")
         loadIssues()
       }
     }
@@ -736,45 +936,32 @@ object PortalClient:
     val protocol = if dom.window.location.protocol == "https:" then "wss:" else "ws:"
     val socket = dom.WebSocket(s"$protocol//${dom.window.location.host}/api/events")
     eventSocket = Some(socket)
-    socket.onopen = _ => identifyEventSocket()
+    socket.onopen = _ => socket.send(ujson.Obj("type" -> "presence").render())
     socket.onmessage = event =>
       try
         val message = ujson.read(event.data.toString)
         if message.obj.get("type").exists(_.str == "issue-updated") then
           val number = jsonInt(message("number"))
           loadIssues()
-          selected.now().foreach { detail =>
+          selected.now().filter(_ => activeView.now() == "detail").foreach { detail =>
             if detail.issue.number == number then loadDetail(number, syncComments = false, updateHistory = false)
           }
         else if message.obj.get("type").exists(_.str == "connected-users") then
-          connectedUsers.set(message("users").arr.map(_.str).toList)
+          connectedUsers.set(message("users").arr.map(user => Participant(user("id").str, user("displayName").str, Identity(user("provider").str, user("identifier").str))).toList)
+        else if message.obj.get("type").exists(_.str == "access-changed") then
+          loadSession()
       catch case t: Throwable => showError(t)
     socket.onclose = _ =>
       if eventSocket.contains(socket) then eventSocket = None
-      dom.window.setTimeout(() => connectEvents(), 2000)
-
-  private def identifyEventSocket(): Unit =
-    eventSocket.foreach { socket =>
-      val name = contributor.now().trim
-      if socket.readyState == dom.WebSocket.OPEN && name.nonEmpty then
-        socket.send(ujson.Obj("type" -> "identify", "contributor" -> name).render())
-    }
+      dom.window.setTimeout(() => { if authSession.now().nonEmpty && eventSocket.isEmpty then loadSession(refreshIssues = false) }, 2000)
 
   private def saveClassification(number: Int, category: String, subgroup: String, rationale: String): Unit =
-    withContributor { name =>
-      if category.trim.isEmpty then error.set("Choose a category before saving the classification.")
-      else
-        postAndRefresh(
-          number,
-          "/classification",
-          ujson.Obj(
-            "contributor" -> name,
-            "category" -> category,
-            "subgroup" -> (if subgroup.trim.isEmpty then ujson.Null else ujson.Str(subgroup.trim)),
-            "rationale" -> rationale
-          )
-        )
-    }
+    if category.trim.isEmpty then error.set("Choose a category before saving the classification.")
+    else
+      postAndRefresh(number, "/classification", ujson.Obj(
+        "category" -> category,
+        "subgroup" -> (if subgroup.trim.isEmpty then ujson.Null else ujson.Str(subgroup.trim)),
+        "rationale" -> rationale))
 
   private def appendRationale(rationaleVar: Var[String], sentence: String): Unit =
     val current = rationaleVar.now().trim
@@ -786,21 +973,17 @@ object PortalClient:
       rationaleVar.set(s"$current$separator$sentence")
 
   private def saveVote(number: Int, vote: String, comment: String): Unit =
-    withContributor { name =>
-      postAndRefresh(number, "/vote", ujson.Obj("contributor" -> name, "vote" -> vote, "comment" -> comment))
-    }
+    postAndRefresh(number, "/vote", ujson.Obj("vote" -> vote, "comment" -> comment))
 
   private def saveCurrentVote(number: Int, vote: String, comment: String): Unit =
     saveVote(number, if vote.trim.isEmpty then "Not evaluated" else vote, comment)
 
   private def saveComment(number: Int, commentVar: Var[String]): Unit =
-    withContributor { name =>
-      val body = commentVar.now().trim
-      if body.isEmpty then error.set("Enter a comment before saving.")
-      else
-        postAndRefresh(number, "/comments", ujson.Obj("contributor" -> name, "body" -> body))
-        commentVar.set("")
-    }
+    val body = commentVar.now().trim
+    if body.isEmpty then error.set("Enter a comment before saving.")
+    else
+      postAndRefresh(number, "/comments", ujson.Obj("body" -> body))
+      commentVar.set("")
 
   private def postAndRefresh(number: Int, suffix: String, body: ujson.Obj): Unit =
     loading.set(true)
@@ -815,6 +998,9 @@ object PortalClient:
     response.failed.foreach(showError)
 
   private def showSummary(updateHistory: Boolean = true): Unit =
+    if activeView.now() == "admin" then
+      clearNewLocalUser()
+      clearPasswordReset()
     selected.set(None)
     activeView.set("summary")
     if updateHistory then setPath("/summary")
@@ -822,7 +1008,8 @@ object PortalClient:
   private def applyLocationRoute(replaceDefault: Boolean = false): Unit =
     val issuePrefix = "/issues/"
     val path = dom.window.location.pathname
-    if path.startsWith(issuePrefix) then
+    if path == "/admin/users" then showAdmin(updateHistory = false)
+    else if path.startsWith(issuePrefix) then
       path.stripPrefix(issuePrefix).toIntOption match
         case Some(number) => loadDetail(number, updateHistory = false)
         case None         => showSummary(updateHistory = false)
@@ -840,11 +1027,6 @@ object PortalClient:
     try update
     catch case t: Throwable => showError(t)
     finally loading.set(false)
-
-  private def withContributor(run: String => Unit): Unit =
-    val name = contributor.now().trim
-    if name.isEmpty then error.set("Enter a contributor display name before saving.")
-    else run(name)
 
   private def showError(t: Throwable): Unit =
     loading.set(false)
@@ -872,7 +1054,10 @@ object PortalClient:
         Some(AuthSession(
           provider = other("provider").str,
           displayName = other("displayName").str,
-          email = optString(other.obj.getOrElse("email", ujson.Null))
+          email = optString(other.obj.getOrElse("email", ujson.Null)),
+          id = other("id").str,
+          role = other("role").str,
+          identifier = other("identifier").str
         ))
 
   private def urlError(): Option[String] =
@@ -934,17 +1119,19 @@ object PortalClient:
       subgroup = optString(value("subgroup")),
       rationale = value("rationale").str,
       contributor = value("contributor").str,
-      createdAt = value("createdAt").str
+      createdAt = value("createdAt").str,
+      identity = readIdentity(value)
     )
 
   private def readVoteCount(value: ujson.Value): VoteCount =
     VoteCount(normalizeVote(value("vote").str), jsonInt(value("count")))
 
   private def readVote(value: ujson.Value): Vote =
-    Vote(value("contributor").str, normalizeVote(value("vote").str), optString(value.obj.getOrElse("comment", ujson.Null)).filter(_.trim.nonEmpty), value("updatedAt").str)
+    Vote(value("contributor").str, normalizeVote(value("vote").str), optString(value.obj.getOrElse("comment", ujson.Null)).filter(_.trim.nonEmpty), value("updatedAt").str,
+      optString(value.obj.getOrElse("userId", ujson.Null)), readIdentity(value))
 
   private def readComment(value: ujson.Value): Comment =
-    Comment(value("contributor").str, value("body").str, value("createdAt").str)
+    Comment(value("contributor").str, value("body").str, value("createdAt").str, readIdentity(value))
 
   private def readGitHubComment(value: ujson.Value): GitHubComment =
     GitHubComment(
@@ -964,7 +1151,8 @@ object PortalClient:
       rationale = classification.rationale,
       contributor = classification.contributor,
       createdAt = classification.createdAt,
-      votes = value("votes").arr.map(readVote).toList
+      votes = value("votes").arr.map(readVote).toList,
+      identity = classification.identity
     )
 
   private def optString(value: ujson.Value): Option[String] =
@@ -1035,7 +1223,9 @@ object Http:
     val promise = Promise[String]()
     val xhr = new dom.XMLHttpRequest()
     xhr.open(method, url)
-    if method != "GET" then xhr.setRequestHeader("Content-Type", "application/json")
+    if method != "GET" then
+      xhr.setRequestHeader("Content-Type", "application/json")
+      xhr.setRequestHeader("X-Yang-Portal", "1")
     xhr.onload = (_: dom.Event) =>
       if xhr.status >= 200 && xhr.status < 300 then promise.success(xhr.responseText)
       else
@@ -1049,13 +1239,15 @@ object Http:
 
 final case class IssueLabel(name: String, color: Option[String])
 final case class AuthProviders(github: Boolean, google: Boolean)
-final case class AuthSession(provider: String, displayName: String, email: Option[String])
+final case class AuthSession(provider: String, displayName: String, email: Option[String], id: String, role: String, identifier: String)
+final case class Identity(provider: String, identifier: String)
+final case class Participant(id: String, displayName: String, identity: Identity)
 final case class Issue(number: Int, title: String, url: String, state: String, labels: List[IssueLabel], body: String, updatedAt: String, cachedAt: String)
-final case class Classification(revisionId: Long, category: String, subgroup: Option[String], rationale: String, contributor: String, createdAt: String)
+final case class Classification(revisionId: Long, category: String, subgroup: Option[String], rationale: String, contributor: String, createdAt: String, identity: Option[Identity])
 final case class VoteCount(vote: String, count: Int)
-final case class Vote(contributor: String, vote: String, comment: Option[String], updatedAt: String)
-final case class Comment(contributor: String, body: String, createdAt: String)
+final case class Vote(contributor: String, vote: String, comment: Option[String], updatedAt: String, userId: Option[String], identity: Option[Identity])
+final case class Comment(contributor: String, body: String, createdAt: String, identity: Option[Identity])
 final case class GitHubComment(author: String, body: String, url: String, createdAt: String, updatedAt: String)
-final case class HistoryItem(revisionId: Long, category: String, subgroup: Option[String], rationale: String, contributor: String, createdAt: String, votes: List[Vote])
+final case class HistoryItem(revisionId: Long, category: String, subgroup: Option[String], rationale: String, contributor: String, createdAt: String, votes: List[Vote], identity: Option[Identity])
 final case class IssueSummary(issue: Issue, classification: Option[Classification], voteSummary: List[VoteCount], commentCount: Int)
 final case class IssueDetail(issue: Issue, classification: Option[Classification], voteSummary: List[VoteCount], votes: List[Vote], comments: List[Comment], githubComments: List[GitHubComment], history: List[HistoryItem])
